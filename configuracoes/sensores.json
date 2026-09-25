@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "sensors": [
+    {
+      "name": "Acel 1",
+      "sensor_type": "Acelerometro",
+      "manufacturer": "",
+      "model": "",
+      "serial_number": "",
+      "sensitivity": "",
+      "sensitivity_unit": "mV/g",
+      "unit": "g",
+      "gain": 1.0,
+      "offset": 0.0,
+      "notes": "",
+      "parameters": {},
+      "id": "bab5fb9d-e99c-4f64-9f33-ebb2c5b8524e"
+    }
+  ]
+}
