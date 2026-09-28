@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import math
 
 from ads1800_app.backends.base import DeviceInfo
 from ads1800_app.config import ChannelConfig
@@ -38,20 +39,35 @@ class LynxBackend:
         return LynxDriver, LDTP_Const
 
     def connect(self, ip: str) -> DeviceInfo:
-        LynxDriver, _ = self._load_driver()
+        LynxDriver, constants = self._load_driver()
         driver = LynxDriver.LynxDriverV1()
         if not driver.ConnectTo(ip):
             raise ConnectionError(
                 f"O ADS 1800 nao respondeu em {ip}. Verifique cabo, IP, rota e firewall."
             )
+        try:
+            rates = [float(value) for value in driver.GetAvailableSampFreq()]
+            dev = driver.Module.GetDevInfo(0)
+            analog_channels = [item for item in driver.ChInfo[0]
+                               if not item.IsDig and item.ChIndex >> 10 == constants.LDTP_CHTYPE_ANIN]
+            channels = []
+            for item in analog_channels:
+                low, high = float(item.LowLim), float(item.HighLim)
+                if not (math.isfinite(low) and math.isfinite(high)):
+                    raise ValueError('Equipamento informou limites de engenharia inválidos.')
+                channels.append(ChannelConfig(item.ChIndex & 1023, name=item.Name, unit=item.Unit,
+                                              engineering_min=low, engineering_max=high))
+            if not channels or len(channels) != dev.NumAnInCh:
+                raise ValueError('Não foi possível ler a configuração de todos os canais analógicos.')
+        except Exception:
+            driver.DisconnectFrom(ip)
+            raise
         self._driver = driver
         self._ip = ip
-        rates = [float(value) for value in driver.GetAvailableSampFreq()]
         self._available_sample_rates = sorted(set(rates))
-        analog_channels = [item for item in driver.ChInfo[0] if not item.IsDig][:8]
-        tag = getattr(driver.Module.GetDevInfo(0), "Tag", "")
+        tag = getattr(dev, 'Tag', '')
         return DeviceInfo(
-            f"ADS 1800 {tag}".strip(), ip, len(analog_channels) or 8, rates
+            f"ADS 1800 {tag}".strip(), ip, len(channels), rates, channels
         )
 
     def disconnect(self) -> None:
@@ -96,12 +112,9 @@ class LynxBackend:
         if not samples:
             return [], []
         timestamps = [float(value) for value in samples[0]]
-        calibrated = []
-        for channel, raw_values in zip(self._channels, samples[1:]):
-            calibrated.append(
-                [channel.apply_calibration(float(value)) for value in raw_values]
-            )
-        return timestamps, calibrated
+        # GetAllSamples already converts signed ADC counts using the device limits.
+        # Never apply legacy application gain/offset a second time.
+        return timestamps, [[float(value) for value in values] for values in samples[1:]]
 
     def stop(self) -> None:
         if self._driver is not None:

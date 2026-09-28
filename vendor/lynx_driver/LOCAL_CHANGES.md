@@ -30,3 +30,14 @@ A pasta original `LynxPythonDriver` não foi modificada.
   no pacote. As taxas documentadas de 1 e 5 Hz antes calculavam zero.
 - `tests/test_ldtp_setup.py`: acrescentada cobertura de 1/5 Hz, 12/24/48 kHz,
   incluindo 8 canais, sem alterar a frequência enviada ao equipamento.
+
+## 2026-09-28 — Limites de engenharia
+
+Em `LynxDriverV1.__GetAnChannelConf`, LOWLIM passa a preencher `LowLim` e
+HIGHLIM passa a preencher `HighLim`. As atribuições estavam invertidas.
+Os coeficientes existentes agora correspondem à interpolação do Guia-Driver:
+`(superior-inferior)*(x+1)/2+inferior`, para x normalizado.
+`GetAllSamples()` entrega a engenharia diretamente, sem calibração adicional
+no aplicativo. Teste: `tests/test_engineering.py`, com respostas de parâmetros
+e amostras brutas simuladas, inclusive escala assimétrica e extrapolação.
+Ainda não validado com equipamento físico.

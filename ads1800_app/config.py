@@ -41,6 +41,8 @@ class ChannelConfig:
     input_min: float | None = None
     input_max: float | None = None
     input_unit: str = 'V'
+    engineering_min: float | None = None
+    engineering_max: float | None = None
 
     def label(self) -> str:
         return self.name.strip() or f"Canal {self.number + 1}"

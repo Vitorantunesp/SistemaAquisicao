@@ -1,6 +1,6 @@
 # Sistema de aquisicao LYNX ADS 1800
 
-Aplicativo desktop em Python para conectar ao ADS 1800, configurar os oito canais analogicos, visualizar sinais em tempo real e gravar os resultados em CSV.
+Aplicativo desktop em Python para conectar ao ADS 1800, selecionar os canais analogicos, visualizar sinais em tempo real e gravar os resultados em CSV.
 
 ## Primeira instalacao
 
@@ -13,7 +13,7 @@ O projeto inclui uma copia dos modulos Python fornecidos pela LYNX em `vendor/ly
 ## Uso
 
 1. Na aba **Conexao**, escolha `ADS 1800 real`, informe o IP e conecte. O endereco padrao documentado pela LYNX e `192.168.1.180`.
-2. Na aba **Canais e experimento**, selecione os canais e informe tipo de sensor, nome, unidade, ganho e offset. O valor salvo e `valor_recebido * ganho + offset`.
+2. Na aba **Canais e experimento**, marque os canais que serão lidos. Nomes, unidades e limites vêm do equipamento; passe o mouse sobre a caixa para consultar os limites.
 3. Escolha uma frequencia aceita pelo equipamento. Depois da conexao, a lista e substituida pelas frequencias informadas pelo proprio ADS 1800.
 4. Na aba **Visualizacao e gravacao**, inicie a aquisicao e, quando desejar, a gravacao CSV.
 
@@ -21,7 +21,7 @@ O modo **Simulador** permite testar todo o fluxo sem o hardware.
 
 ## Configuracao fisica dos sensores
 
-Faixa eletrica, excitacao, ponte, IEPE e demais parametros internos devem ser configurados e salvos previamente no ADS 1800 pelo ADS1800Assistant/Lynx@Net. O driver Python fornecido le do equipamento o nome, a unidade e os limites ja gravados. Os campos deste aplicativo registram metadados do experimento e aplicam uma calibracao linear adicional.
+Faixa eletrica, excitacao, ponte, IEPE e demais parametros internos devem ser configurados e salvos previamente no ADS 1800 pelo ADS1800Assistant/Lynx@Net. O driver Python fornecido le do equipamento o nome, a unidade e os limites ja gravados. O aplicativo usa esses dados sem aplicar ganho ou offset adicionais. Após alterar a configuração no Assistente, desconecte e conecte novamente para reler os parâmetros.
 
 ## CSV
 
@@ -111,52 +111,39 @@ fica vazia até que haja dados suficientes para preencher a janela. Ao parar
 a aquisição ou deixar de receber dados, os gráficos preservam a última
 amostra; o programa não inventa sinais durante a ausência de dados.
 
-## Catálogo de acelerômetros e martelos
+## Conversão para unidades de engenharia
 
-Na aba **Canais e experimento**:
+Ao conectar, o driver consulta nome (1901), unidade (1902), limite inferior
+(1921) e limite superior (1922) dos canais analógicos. Esses parâmetros são
+lidos pela conexão de comandos, antes da aquisição; não são deduzidos da
+amplitude observada no gráfico.
 
-1. Abra **Catálogo de sensores...** e clique em **Novo**.
-2. Preencha nome, tipo (acelerômetro, martelo de impacto ou texto livre),
-   fabricante, modelo, série, sensibilidade e sua unidade, unidade de saída,
-   ganho, offset e observações.
-3. Em **Parâmetros adicionais**, adicione livremente pares de nome e valor:
-   massa, faixa de medição, frequência de ressonância, IEPE, ponta do martelo,
-   data de calibração, certificado etc.
-4. Clique em **Salvar**. O cadastro persiste em `configuracoes/sensores.json`,
-   dentro do projeto, e pode ser editado, duplicado ou excluído no catálogo.
-5. Feche o catálogo, selecione o sensor na lista e o canal de destino e clique
-   em **Aplicar ao canal**. O estado da caixa **Usar** é mantido; marque-a para
-   adquirir aquele canal. Nome, tipo, unidade, ganho, offset, observações e
-   uma cópia integral dos parâmetros passam para o canal.
-6. **Salvar configuração...** preserva também essa cópia do sensor no JSON do
-   experimento. Editar o catálogo depois não modifica experimentos anteriores.
-   Para atualizar um canal, aplique novamente o cadastro desejado.
+Conforme o Guia-Driver, para a amostra normalizada `x` na faixa nominal [-1, 1]:
 
-**Importar lista JSON...** adiciona registros de um catálogo exportado pelo
-programa sem substituir os já existentes. Importações repetidas criam cópias.
-**Exportar lista JSON...** permite compartilhar a lista com outro operador.
-O formato é um objeto com `version: 1` e `sensors`, uma lista de registros;
-os campos livres ficam no objeto `parameters` de cada registro.
+`engenharia = (superior - inferior) * (x + 1) / 2 + inferior`
 
-### Sensibilidade e conversão
+No driver Python, a amostra recebida é um inteiro com sinal. A faixa nominal
+total é `R = LDTP_ANIN_RANGE_NOT_OVERRANGE = 3932160000`, com `x = 2 * bruto / R`.
+A forma equivalente aplicada por `GetAllSamples()` é:
 
-A conversão numérica continua sendo `valor recebido × ganho + offset`.
-A sensibilidade cadastrada não altera o ganho automaticamente. Use
-**Calcular ganho pela sensibilidade...** para preenchê-lo explicitamente,
-indicando se o driver entrega os valores em V ou mV. A unidade de sensibilidade
-precisa corresponder à saída, por exemplo `mV/g` para saída `g` ou `mV/N` para
-saída `N`. Por exemplo, 100 mV/g com entrada em V resulta em ganho 10 g/V;
-2,5 mV/N com entrada em V resulta em ganho 400 N/V. O offset continua editável.
+`engenharia = bruto * (superior - inferior) / R + (superior + inferior) / 2`
 
-O driver LYNX já entrega valores escalados conforme o equipamento. Se eles já
-estiverem em g, m/s² ou N, não aplique novamente a conversão de tensão por
-sensibilidade: defina o ganho adicional apropriado (1 quando não houver outra
-conversão). Os demais parâmetros são metadados; IEPE, excitação e faixas
-elétricas continuam sendo configurados pelo Assistente LYNX.
+A cópia local do driver foi corrigida: a resposta de LOWLIM era atribuída a
+HighLim e a de HIGHLIM a LowLim, invertendo o sentido da conversão. O diretório
+original do fabricante permanece preservado. Testes usam respostas LDTP
+simuladas e verificam os extremos, o ponto médio e valores fora da faixa nominal,
+sem recortar as amostras. A validação física ainda deve ser feita em bancada.
 
-O CSV inclui linhas `Sensor_canal` com o cadastro aplicado e `Calibracao_canal`
-com o ganho, offset e unidade efetivamente usados. Configurações antigas sem
-catálogo continuam sendo aceitas.
+Gráficos, indicadores e CSV recebem os mesmos valores de engenharia, com uma
+única conversão. Para obter g, m/s² ou N, a escala e a unidade correspondentes
+devem estar configuradas no equipamento. Se ele informar V, a leitura será em V.
+O CSV registra `Limites_engenharia_canal` com canal, inferior, superior e unidade.
+
+A configuração manual dos canais, o catálogo e a aba de limites foram retirados
+da interface. Os arquivos antigos do catálogo permanecem preservados. Ao carregar
+um experimento antigo, somente seleção dos canais, preferências do gráfico e dados
+do experimento são restaurados; os parâmetros de calibração antigos são ignorados.
+Os controles Mín./Máx. em cada gráfico alteram apenas a escala visual.
 
 ### Redimensionar gráficos com o mouse
 
@@ -178,55 +165,10 @@ tempo, a escala vertical ou a frequência de aquisição.
 
 Acima de cada gráfico aparece o valor da **última amostra recebida**, com
 seis algarismos significativos e a unidade configurada (por exemplo g, m/s²
-ou N). O indicador já considera o ganho e offset do canal e informa o instante
+ou N). O indicador usa a conversão pelos limites do equipamento e informa o instante
 da amostra. Ele acompanha a atualização visual selecionada entre 1 e 30 Hz.
 Não representa média, RMS ou pico; o CSV continua recebendo todas as amostras.
 Antes de receber dados mostra um traço; amostras não finitas mostram
 **Inválido**. Ao parar, a última leitura permanece com seu instante; ao iniciar
 outra aquisição, o indicador é reinicializado.
 
-### Tipo e escala de entrada
-
-O catálogo e a tabela de canais possuem campos próprios para **Tipo de entrada
-elétrica** (tensão, IEPE/CCP, corrente etc.) e **Escala de entrada**, com unidade
-(ex.: ±10 V, ±100 mV). Os campos são editáveis e copiados ao aplicar o sensor,
-persistidos no JSON do experimento e registrados como `Entrada_canal` no CSV.
-Eles documentam a configuração: não alteram a faixa elétrica nem habilitam
-IEPE no hardware. Essas operações continuam sendo feitas no Assistente LYNX.
-
-A aplicação da sensibilidade já está disponível por **Calcular ganho pela
-sensibilidade...**, seguida de **Salvar** e **Aplicar ao canal**. O ganho
-resultante é utilizado no gráfico, no indicador numérico e nas amostras CSV.
-Alterar apenas o número cadastrado em Sensibilidade não recalcula o ganho;
-é necessário usar o botão para recalcular quando a sensibilidade mudar.
-
-A atualização visual não é igual à taxa de amostragem. A tela é redesenhada
-de 1 a 30 vezes por segundo e recebe blocos de amostras; a aquisição e a
- gravação mantêm a frequência selecionada (por exemplo, 24000 amostras/s por
-canal). O gráfico representa a janela temporal com redução por extremos,
-e o indicador numérico mostra a última amostra de cada atualização. Igualar
-redesenhos de tela a 24 kHz não é uma capacidade oferecida pelo aplicativo.
-
-## Aba Limites e escalas
-
-A aba **3. Limites e escalas** centraliza dois grupos independentes:
-
-- **Faixa elétrica de entrada:** marque **Definir faixa** e informe mínimo,
-  máximo e unidade elétrica (V, mV, mA etc.). O resumo **Escala de entrada** na
-  tabela de canais é atualizado automaticamente. O catálogo também aceita
-  mínimo, máximo e unidade elétrica, copiados ao aplicar o sensor. Esta faixa
-  é um registro; a programação física continua pelo Assistente LYNX.
-- **Limites do gráfico:** na unidade calibrada do canal (g, m/s², N etc.),
-  desmarque **Y automático** para definir mínimo e máximo. As alterações são
-  sincronizadas nos dois sentidos com os controles da janela do gráfico e
-  podem ser feitas durante a aquisição. A faixa elétrica fica bloqueada
-  durante a aquisição, assim como as demais configurações de entrada.
-
-**Salvar configuração...** nessa aba preserva ambos os grupos no JSON do
-experimento. Limites manuais também são restaurados no próximo início.
-Os valores devem ser finitos e mínimo deve ser menor que máximo. Esses
-controles não saturam, recortam nem recalibram amostras ou CSV.
-
-Configurações anteriores continuam válidas: sem campos numéricos de entrada,
-a descrição textual antiga é preservada sem adivinhar unidades/limites.
-Para unificar um cadastro antigo, preencha a faixa numérica explicitamente.

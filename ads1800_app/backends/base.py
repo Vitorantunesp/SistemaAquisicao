@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from ads1800_app.config import ChannelConfig
@@ -12,6 +12,7 @@ class DeviceInfo:
     ip: str
     channel_count: int
     available_sample_rates: list[float]
+    channels: list[ChannelConfig] = field(default_factory=list)
 
 
 class AcquisitionBackend(Protocol):

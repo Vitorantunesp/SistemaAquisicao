@@ -127,6 +127,9 @@ class AcquisitionController:
             writer.writerow(["Inicio", datetime.now().isoformat(timespec="seconds")])
             writer.writerow(["Frequencia_Hz", self._config.sample_rate])
             for channel in channels:
+                if channel.engineering_min is not None:
+                    writer.writerow(['Limites_engenharia_canal', channel.number + 1,
+                                     channel.engineering_min, channel.engineering_max, channel.unit])
                 if channel.input_type or channel.input_scale or channel.input_min is not None:
                     input_scale = (f'{channel.input_min:g} a {channel.input_max:g} {channel.input_unit}'
                                    if channel.input_min is not None else channel.input_scale)

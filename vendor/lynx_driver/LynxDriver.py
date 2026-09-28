@@ -735,7 +735,7 @@ class LynxDriverV1:
             return False
         else:
             for i in range(0, aux[0].CountI):
-                self.ChInfo[devInd][i + chOffset].HighLim = self.__IntToFloat32(res[1][0].Values[i])
+                self.ChInfo[devInd][i + chOffset].LowLim = self.__IntToFloat32(res[1][0].Values[i])
 
         # Channel High Limit
         if (chType == LDTP_Const.LDTP_CHTYPE_ANIN):
@@ -764,7 +764,7 @@ class LynxDriverV1:
             return False
         else:
             for i in range(0, aux[0].CountI):
-                self.ChInfo[devInd][i + chOffset].LowLim = self.__IntToFloat32(res[1][0].Values[i])
+                self.ChInfo[devInd][i + chOffset].HighLim = self.__IntToFloat32(res[1][0].Values[i])
 
         for i in range(0, aux[0].CountI):
             self.ChInfo[devInd][i + chOffset].ChIndex = i + (chType << 10)

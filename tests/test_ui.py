@@ -36,8 +36,6 @@ class QtTests(unittest.TestCase):
         config = window._read_config()
         config.sample_rate = 24000
         config.channels[1].enabled = True
-        config.channels[1].gain = 2
-        config.channels[1].offset = 3
         config.description = 'Teste PyQt'
         window._apply_config(config)
         self.assertEqual(window._read_config(), config)

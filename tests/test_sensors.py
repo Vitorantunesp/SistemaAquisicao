@@ -59,40 +59,6 @@ class SensorTests(unittest.TestCase):
             editor.read_profile()
         editor.close()
 
-    def test_apply_to_channel_save_reload_and_csv_metadata(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'sensors.json'
-            profile = self.profile()
-            save_catalog(path, [profile])
-            with patch('ads1800_app.ui.app.CATALOG_PATH', path):
-                window = Ads1800App()
-                window.sensor_channel.setCurrentIndex(2)
-                window.apply_sensor_button.click()
-                self.assertFalse(window.channel_widgets[2]['enabled'].isChecked())
-                window.channel_widgets[2]['enabled'].setChecked(True)
-                config = window._read_config()
-                self.assertEqual(config.channels[2].sensor_profile['parameters']['Massa'], '5 g')
-                self.assertEqual(config.channels[2].apply_calibration(.2), 2)
-                self.assertEqual(config.channels[2].input_type, 'IEPE / CCP')
-                self.assertEqual(config.channels[2].input_scale, '±10 V')
-                # Editing the catalog later cannot mutate the applied experiment.
-                window.sensor_profiles[0].parameters['Massa'] = '10 g'
-                self.assertEqual(window._read_config().channels[2].sensor_profile['parameters']['Massa'], '5 g')
-                config_path = Path(directory) / 'experiment.json'
-                config.save(config_path)
-                window._apply_config(ExperimentConfig.load(config_path))
-                self.assertEqual(window._read_config(), config)
-                controller = AcquisitionController(None, lambda t, v: None, lambda e: None)
-                controller._config = config
-                controller._csv_path = Path(directory) / 'samples.csv'
-                controller._write_csv()
-                csv = controller._csv_path.read_text(encoding='utf-8-sig')
-                self.assertIn('Sensor_canal;3;', csv)
-                self.assertIn('Entrada_canal;3;IEPE / CCP;±10 V', csv)
-                self.assertIn('Calibracao_canal;3;10.0;0.0;g', csv)
-                self.assertIn('123', csv)
-                window.close()
-
     def test_duplicate_sensor_gets_new_id_and_is_saved(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'sensors.json'

@@ -14,14 +14,12 @@ from PyQt6.QtWidgets import (
 )
 
 from ads1800_app.backends import LynxBackend, SimulatorBackend
-from ads1800_app.config import ADS1800_SAMPLE_RATES, ChannelConfig, ExperimentConfig, SENSOR_TYPES
+from ads1800_app.config import ADS1800_SAMPLE_RATES, ChannelConfig, ExperimentConfig
 from ads1800_app.controller import AcquisitionController
 
 from ads1800_app.ui.plots import PlotDashboard
-from ads1800_app.ui.limits import LimitsTab
-from ads1800_app.ui.sensors import CATALOG_PATH, SensorCatalogDialog
-from ads1800_app.sensors import load_catalog
-from copy import deepcopy
+from dataclasses import replace
+
 
 
 class Ads1800App(QMainWindow):
@@ -52,17 +50,13 @@ class Ads1800App(QMainWindow):
         self.connection_tab = QWidget()
         self.channels_tab = QWidget()
         self.acquisition_tab = QWidget()
-        self.limits_tab = LimitsTab()
         for tab, name in ((self.connection_tab, '1. Conexão'), (self.channels_tab, '2. Canais e experimento'),
-                          (self.limits_tab, '3. Limites e escalas'), (self.acquisition_tab, '4. Visualização e gravação')):
+                          (self.acquisition_tab, '3. Visualização e gravação')):
             self.tabs.addTab(tab, name)
         self._make_connection()
         self._make_channels()
         self._make_acquisition()
-        self.limits_tab.display_changed.connect(self._set_display_limits)
-        self.limits_tab.input_changed.connect(self._input_limits_changed)
         self.plot.limits_changed.connect(self._set_display_limits)
-        self._button('Salvar configuração...', self._save_config, self.limits_tab.actions)
         self.statusBar().showMessage('Pronto.')
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._process_events)
@@ -118,103 +112,44 @@ class Ads1800App(QMainWindow):
         content = QWidget()
         grid = QGridLayout(content)
         grid.setAlignment(Qt.AlignmentFlag.AlignTop)
-        keys = ['enabled', 'number', 'sensor_type', 'name', 'unit', 'gain', 'offset', 'input_type', 'input_scale', 'notes']
-        for column, title in enumerate(['Usar', 'Canal', 'Tipo de sensor', 'Nome', 'Unidade', 'Ganho', 'Offset', 'Entrada elétrica', 'Escala de entrada', 'Observações']):
-            grid.addWidget(QLabel(title), 0, column)
+        self.channel_grid = grid
         self.channel_widgets = []
-        self.channel_profiles = [{} for _ in range(8)]
-        for i in range(8):
-            widgets = dict(enabled=QCheckBox(), number=QLabel(str(i + 1)), sensor_type=QComboBox(),
-                           name=QLineEdit(f'Canal {i + 1}'), unit=QLineEdit('V'), gain=QLineEdit('1'),
-                           offset=QLineEdit('0'), input_type=QLineEdit(), input_scale=QLineEdit(), notes=QLineEdit())
-            widgets['enabled'].setChecked(i == 0)
-            widgets['input_type'].setPlaceholderText('Ex.: IEPE / CCP')
-            widgets['input_scale'].setPlaceholderText('Ajustar na aba Limites')
-            widgets['input_scale'].setReadOnly(True)
-            for key in ('input_type', 'input_scale'):
-                widgets[key].setToolTip('Registro da configuração elétrica. Configure o ADS 1800 pelo Assistente LYNX.')
-            widgets['sensor_type'].addItems(SENSOR_TYPES)
-            widgets['sensor_type'].setEditable(True)
-            for column, key in enumerate(keys):
-                grid.addWidget(widgets[key], i + 1, column)
-            self.channel_widgets.append(widgets)
-            widgets['name'].textChanged.connect(lambda text, index=i: self.limits_tab.rows[index]['name'].setText(f'CH {index+1} · {text}'))
-            widgets['unit'].textChanged.connect(lambda text, index=i: self.limits_tab.rows[index]['unit'].setText(text))
+        self.device_channels = []
+        self._selected_channels = {0}
+        self._display_limits = {}
+        self.channel_hint = QLabel('Conecte ao equipamento para selecionar os canais.')
+        grid.addWidget(self.channel_hint, 0, 0)
         scroll.setWidget(content)
         layout.addWidget(scroll)
+        note = QLabel('Nomes, unidades e limites de engenharia são lidos do equipamento ao conectar. '
+                      'Após alterar a configuração no Assistente LYNX, desconecte e conecte novamente.')
+        note.setWordWrap(True)
+        layout.addWidget(note)
         buttons = QHBoxLayout()
-        self._button('Salvar configuração...', self._save_config, buttons)
-        self._button('Carregar configuração...', self._load_config, buttons)
+        self._button('Salvar experimento...', self._save_config, buttons)
+        self._button('Carregar experimento...', self._load_config, buttons)
         layout.addLayout(buttons)
-        catalog = QHBoxLayout()
-        self._button('Catálogo de sensores...', self._manage_sensors, catalog)
-        self.sensor_choice = QComboBox()
-        self.sensor_choice.setMinimumWidth(180)
-        catalog.addWidget(self.sensor_choice, 1)
-        self.sensor_channel = QComboBox()
-        self.sensor_channel.addItems([f'Canal {i + 1}' for i in range(8)])
-        catalog.addWidget(self.sensor_channel)
-        self.apply_sensor_button = self._button('Aplicar ao canal', self._apply_sensor, catalog)
-        layout.addLayout(catalog)
-        self.catalog_status = QLabel()
-        self.catalog_status.setWordWrap(True)
-        layout.addWidget(self.catalog_status)
-        self._refresh_sensor_catalog()
 
-    def _refresh_sensor_catalog(self):
-        self.sensor_choice.clear()
-        self.sensor_profiles = []
-        try:
-            self.sensor_profiles = load_catalog(CATALOG_PATH) if CATALOG_PATH.exists() else []
-            for profile in self.sensor_profiles:
-                self.sensor_choice.addItem(f'{profile.name} | {profile.model} | {profile.serial_number}')
-            self.catalog_status.setText('Selecione um sensor e o canal de destino. Aplicar copia nome, tipo, unidade, ganho, offset e parâmetros.' if self.sensor_profiles else 'Catálogo vazio. Cadastre acelerômetros e martelos em Catálogo de sensores.')
-        except Exception as exc:
-            self.catalog_status.setText(f'Não foi possível ler o catálogo: {exc}')
-        self.apply_sensor_button.setEnabled(bool(self.sensor_profiles))
-
-    def _manage_sensors(self):
-        try:
-            SensorCatalogDialog(self).exec()
-            self._refresh_sensor_catalog()
-        except Exception as exc:
-            self._show_error(exc)
-
-    def _apply_sensor(self):
-        if self._busy or (self.controller and self.controller.running):
-            return
-        selected = self.sensor_choice.currentIndex()
-        if selected < 0:
-            return
-        profile = self.sensor_profiles[selected]
-        index = self.sensor_channel.currentIndex()
-        widgets = self.channel_widgets[index]
-        widgets['sensor_type'].setCurrentText(profile.sensor_type)
-        for key in ('name', 'unit', 'gain', 'offset', 'input_type', 'input_scale', 'notes'):
-            widgets[key].setText(str(getattr(profile, key)))
-        self.channel_profiles[index] = profile.snapshot()
-        existing = self.limits_tab.values(index)
-        self.limits_tab.apply_channel(ChannelConfig(index, display_min=existing['display_min'], display_max=existing['display_max'], display_auto=existing['display_auto'], input_min=profile.input_min, input_max=profile.input_max, input_unit=profile.input_unit))
-        if profile.input_min is not None:
-            self._input_limits_changed(index)
-        widgets['name'].setToolTip(f'{profile.manufacturer} {profile.model} | Série: {profile.serial_number}\nSensibilidade: {profile.sensitivity} {profile.sensitivity_unit}')
-        self.catalog_status.setText(f'{profile.name} aplicado ao canal {index + 1}. Marque Usar para adquirir esse canal.')
+    def _show_device_channels(self, channels):
+        if self.channel_widgets:
+            self._selected_channels = {c.number for c, w in zip(self.device_channels, self.channel_widgets)
+                                       if w['enabled'].isChecked()}
+        for widgets in self.channel_widgets:
+            self.channel_grid.removeWidget(widgets['enabled'])
+            widgets['enabled'].deleteLater()
+        self.device_channels = [replace(channel) for channel in channels]
+        self.channel_widgets = []
+        self.channel_hint.setVisible(not channels)
+        for row, channel in enumerate(self.device_channels, 1):
+            checkbox = QCheckBox(f'CH {channel.number + 1} · {channel.label()} [{channel.unit}]')
+            checkbox.setChecked(channel.number in self._selected_channels)
+            checkbox.setToolTip(f'Limites de engenharia do equipamento: '
+                               f'{channel.engineering_min:g} a {channel.engineering_max:g} {channel.unit}')
+            self.channel_grid.addWidget(checkbox, row, 0)
+            self.channel_widgets.append({'enabled': checkbox})
 
     def _set_display_limits(self, index, low, high, automatic):
-        self.limits_tab.set_display(index, low, high, automatic)
-        if index in self.plot.channel_numbers:
-            self.plot.panels[self.plot.channel_numbers.index(index)].set_limits(low, high, automatic)
-
-    def _input_limits_changed(self, index):
-        values = self.limits_tab.values(index)
-        low, high, unit = values['input_min'], values['input_max'], values['input_unit']
-        if low is None:
-            self.channel_widgets[index]['input_scale'].clear()
-        elif low < high and unit:
-            self.channel_widgets[index]['input_scale'].setText(f'{low:g} a {high:g} {unit}')
-            self.limits_tab.status.clear()
-        else:
-            self.limits_tab.status.setText(f'Canal {index+1}: informe mínimo elétrico menor que máximo e unidade.')
+        self._display_limits[index] = (low, high, automatic)
 
     def _make_acquisition(self):
         layout = QVBoxLayout(self.acquisition_tab)
@@ -278,7 +213,6 @@ class Ads1800App(QMainWindow):
         self.connect_button.setText('Desconectar' if connected else 'Conectar e reconhecer')
         self.connection_fields.setEnabled(not self._busy and not connected)
         self.channels_tab.setEnabled(not self._busy and not running)
-        self.limits_tab.electrical.setEnabled(not self._busy and not running)
         self.start_button.setEnabled(connected and not running and not self._busy)
         self.stop_button.setEnabled(running and not self._busy)
         self.record_button.setEnabled(running and not self._busy)
@@ -289,6 +223,7 @@ class Ads1800App(QMainWindow):
         if self.backend and self.backend.connected:
             def disconnected(_):
                 self.backend = self.controller = None
+                self._show_device_channels([])
                 self.connection_badge.setText('Desconectado')
                 self.device_info.setText('Nenhum equipamento conectado.')
                 self.frequency_limit.setText('Conecte para consultar as taxas disponíveis no equipamento.')
@@ -297,6 +232,7 @@ class Ads1800App(QMainWindow):
         backend = SimulatorBackend() if self.mode.currentText() == 'Simulador' else LynxBackend()
         ip = self.ip.text().strip()
         def connected(info):
+            self._show_device_channels(info.channels)
             self.backend = backend
             self.controller = AcquisitionController(backend, self._on_data, self._on_error)
             self.connection_badge.setText('Conectado')
@@ -321,14 +257,13 @@ class Ads1800App(QMainWindow):
         self.events.put(('error', exc))
 
     def _read_config(self):
+        if not self.device_channels:
+            raise ValueError('Conecte ao equipamento para ler os canais e seus limites.')
         channels = []
-        for i, widgets in enumerate(self.channel_widgets):
-            values = {key: widgets[key].text() for key in ('name', 'unit', 'notes', 'input_type', 'input_scale')}
-            for key in ('gain', 'offset'):
-                values[key] = float(widgets[key].text().replace(',', '.'))
-            channels.append(ChannelConfig(number=i, enabled=widgets['enabled'].isChecked(),
-                                          sensor_type=widgets['sensor_type'].currentText(),
-                                          sensor_profile=deepcopy(self.channel_profiles[i]), **self.limits_tab.values(i), **values))
+        for channel, widgets in zip(self.device_channels, self.channel_widgets):
+            low, high, automatic = self._display_limits.get(channel.number, (-1, 1, True))
+            channels.append(replace(channel, enabled=widgets['enabled'].isChecked(),
+                                    display_min=low, display_max=high, display_auto=automatic))
         config = ExperimentConfig(name=self.exp_name.text().strip() or 'Experimento',
                                   operator=self.operator.text(), description=self.description.text(),
                                   device_ip=self.ip.text().strip(), sample_rate=float(self.frequency.currentText().replace(',', '.')),
@@ -345,23 +280,13 @@ class Ads1800App(QMainWindow):
             self.ip.setText(config.device_ip)
         self.frequency.setCurrentText(f'{config.sample_rate:g}')
         self.device_timestamp.setChecked(config.use_device_timestamp)
-        for widgets in self.channel_widgets:
-            widgets['enabled'].setChecked(False)
-            widgets['name'].setToolTip('')
-        self.channel_profiles = [{} for _ in range(8)]
-        for i in range(8):
-            self.limits_tab.apply_channel(ChannelConfig(i))
-        for channel in config.channels:
-            self.limits_tab.apply_channel(channel)
-            self._set_display_limits(channel.number, channel.display_min, channel.display_max, channel.display_auto)
-            self.channel_profiles[channel.number] = deepcopy(channel.sensor_profile)
-            widgets = self.channel_widgets[channel.number]
-            widgets['enabled'].setChecked(channel.enabled)
-            widgets['sensor_type'].setCurrentText(channel.sensor_type)
-            for key in ('name', 'unit', 'gain', 'offset', 'input_type', 'input_scale', 'notes'):
-                widgets[key].setText(str(getattr(channel, key)))
-            if channel.input_min is not None:
-                self._input_limits_changed(channel.number)
+        # Saved sensor calibration is legacy data. Only selection and view preferences
+        # are restored; connected hardware remains the authority for measurements.
+        self._selected_channels = {c.number for c in config.channels if c.enabled}
+        self._display_limits = {c.number: (c.display_min, c.display_max, c.display_auto)
+                                for c in config.channels}
+        for channel, widgets in zip(self.device_channels, self.channel_widgets):
+            widgets['enabled'].setChecked(channel.number in self._selected_channels)
 
     def _save_config(self):
         try:

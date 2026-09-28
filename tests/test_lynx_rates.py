@@ -14,8 +14,8 @@ class LynxRatesTests(unittest.TestCase):
                 driver = Mock()
                 driver.ConnectTo.return_value = True
                 driver.GetAvailableSampFreq.return_value = [maximum, 1000]
-                driver.ChInfo = [[SimpleNamespace(IsDig=False)]]
-                driver.Module.GetDevInfo.return_value = SimpleNamespace(Tag='Teste')
+                driver.ChInfo = [[SimpleNamespace(IsDig=False, ChIndex=0, Name='Martelo', Unit='N', LowLim=-100, HighLim=300)]]
+                driver.Module.GetDevInfo.return_value = SimpleNamespace(Tag='Teste', NumAnInCh=1)
                 driver.StartAcq.return_value = True
                 loader = (SimpleNamespace(LynxDriverV1=lambda: driver), SimpleNamespace(LDTP_CHTYPE_ANIN=0))
                 with patch.object(LynxBackend, '_load_driver', return_value=loader):

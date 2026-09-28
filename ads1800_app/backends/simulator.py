@@ -26,6 +26,8 @@ class SimulatorBackend:
         return DeviceInfo(
             "ADS 1800 (simulador)", ip, 8,
             list(ADS1800_SAMPLE_RATES),
+            [ChannelConfig(i, name=f'Canal {i + 1}', unit='V',
+                           engineering_min=-1, engineering_max=1) for i in range(8)],
         )
 
     def disconnect(self) -> None:
@@ -65,7 +67,7 @@ class SimulatorBackend:
                 + random.gauss(0.0, 0.015)
                 for t in timestamps
             ]
-            values.append([channel.apply_calibration(value) for value in raw])
+            values.append(raw)
         self._sample_index += count
         self._last_read += count / self._sample_rate
         return timestamps, values
