@@ -5,9 +5,11 @@ from pathlib import Path
 import sys
 import time
 import json
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDoubleSpinBox, QSpinBox, QComboBox,
                             QFormLayout, QGroupBox, QHBoxLayout, QVBoxLayout, QLabel,
-                            QPushButton, QFileDialog, QDialog, QDialogButtonBox, QMessageBox)
+                            QPushButton, QFileDialog, QDialog, QDialogButtonBox, QMessageBox,
+                            QWidget, QSplitter)
 from ads1800_app.config import ExperimentConfig
 from ads1800_app.monitor_signal import MonitorConfig
 from ads1800_app.ui.app import Ads1800App
@@ -49,6 +51,8 @@ class BridgeApp(Ads1800App):
             QTabBar::tab {background: #1b3040; padding: 10px 22px;}
             QTabBar::tab:selected {background: #176cc0;}
             QScrollArea {border: 0; background: #102331;}
+            QSplitter::handle:vertical {background: #354e61; border-radius: 3px;}
+            QSplitter::handle:vertical:hover {background: #176cc0;}
             QMessageBox {background: #203749;}
         ''')
         self.start_button.setStyleSheet('background: #09995b; color: white; font-weight: bold;')
@@ -88,10 +92,17 @@ class BridgeApp(Ads1800App):
 
     def _make_acquisition(self):
         layout = QVBoxLayout(self.acquisition_tab)
-        top = QHBoxLayout()
+        self.monitor_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.monitor_splitter.setChildrenCollapsible(False)
+        self.monitor_splitter.setHandleWidth(9)
+        layout.addWidget(self.monitor_splitter, 1)
+        upper_panel = QWidget()
+        top = QHBoxLayout(upper_panel)
+        top.setContentsMargins(0, 0, 0, 0)
         bridge = QGroupBox('Posição dos sensores — ponte do laboratório')
         bridge_layout = QVBoxLayout(bridge)
         self.bridge_map = BridgeMap()
+        self.bridge_map.setMinimumHeight(100)
         bridge_layout.addWidget(self.bridge_map)
         top.addWidget(bridge, 5)
         info = QGroupBox('Informações da aquisição')
@@ -116,7 +127,15 @@ class BridgeApp(Ads1800App):
         control_layout.addLayout(row)
         self.record_button = self._button('Iniciar gravação CSV', self._toggle_recording, control_layout)
         top.addWidget(controls, 3)
-        layout.addLayout(top)
+        self.monitor_splitter.addWidget(upper_panel)
+        lower_panel = QWidget()
+        self.monitor_splitter.addWidget(lower_panel)
+        layout = QVBoxLayout(lower_panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.monitor_splitter.setStretchFactor(0, 0)
+        self.monitor_splitter.setStretchFactor(1, 1)
+        self.monitor_splitter.setSizes([300, 560])
+        self.monitor_splitter.handle(1).setToolTip('Arraste para ajustar a altura do painel superior e dos gráficos')
         display = QHBoxLayout()
         self.time_window = QDoubleSpinBox()
         self.time_window.setRange(.1, 60)
@@ -134,6 +153,7 @@ class BridgeApp(Ads1800App):
         display.addStretch()
         layout.addLayout(display)
         self.plot = BridgeDashboard()
+        self.plot.setMinimumHeight(150)
         self.time_window.valueChanged.connect(self.plot.set_window)
         self.refresh_rate.valueChanged.connect(self.plot.set_refresh_rate)
         self.plot_columns.currentIndexChanged.connect(lambda i: self.plot.set_columns(i + 1))

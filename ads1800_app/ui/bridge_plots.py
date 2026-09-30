@@ -3,7 +3,7 @@ import math
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPointF, QRectF
 from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QScrollArea
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QScrollArea, QToolButton
 from ads1800_app.ui.plots import DisplayBuffer, ChannelCanvas, envelope_indices
 from ads1800_app.monitor_signal import StreamingBandpass, spectra
 from ads1800_app.ui.bridge_image import BridgeMap
@@ -62,6 +62,12 @@ class MonitorPanel(QWidget):
         layout.addWidget(self.stats)
         self.plots = []
         self.captions = []
+        self.scale_buttons = []
+        self.time_limits = None
+        low, high = channel.engineering_min, channel.engineering_max
+        # Engineering limits describe the time-domain signal, not FFT amplitude or PSD.
+        if low is not None and high is not None and math.isfinite(low) and math.isfinite(high) and low != high:
+            self.time_limits = tuple(sorted((low, high)))
         self.plot_row = QHBoxLayout()
         layout.addLayout(self.plot_row)
         for caption in (f'Tempo (s) · {channel.unit}', f'FFT · Hz / amplitude ({channel.unit})',
@@ -70,10 +76,29 @@ class MonitorPanel(QWidget):
             col = QVBoxLayout(holder)
             col.setContentsMargins(0, 0, 0, 0)
             canvas = BridgeCanvas(color)
+            canvas.manual_y_range = None
+            canvas.default_y_range = self.time_limits if not self.plots and self.time_limits else (-1., 1.)
+            canvas.y_range = canvas.default_y_range
             canvas.setMinimumSize(230, 78)
             col.addWidget(canvas)
             label = QLabel(caption)
             col.addWidget(label)
+            scale = QHBoxLayout()
+            scale.addWidget(QLabel('Zoom Y'))
+            buttons = {}
+            for text, factor, hint in (
+                    ('+', .5, 'Ampliar verticalmente: reduzir a faixa do eixo Y pela metade'),
+                    ('−', 2., 'Reduzir verticalmente: dobrar a faixa do eixo Y'),
+                    ('Restaurar', None, 'Restaurar a escala inicial: limites do canal no tempo; automática na FFT e PSD')):
+                button = QToolButton()
+                button.setText(text)
+                button.setToolTip(hint)
+                button.clicked.connect(lambda checked=False, c=canvas, f=factor: self.zoom_vertical(c, f))
+                scale.addWidget(button)
+                buttons[text] = button
+            scale.addStretch()
+            col.addLayout(scale)
+            self.scale_buttons.append(buttons)
             self.captions.append(label)
             self.plots.append((holder, canvas))
             self.plot_row.addWidget(holder)
@@ -85,13 +110,33 @@ class MonitorPanel(QWidget):
         self.setMinimumHeight(144)
 
     @staticmethod
-    def draw(canvas, x, y, limits):
+    def zoom_vertical(canvas, factor):
+        if factor is None:
+            canvas.manual_y_range = None
+            canvas.y_range = canvas.default_y_range
+        else:
+            low, high = canvas.y_range
+            center = low / 2 + high / 2
+            half = (high - low) * factor / 2
+            bounds = (center - half, center + half)
+            if not all(math.isfinite(v) for v in bounds) or bounds[0] >= bounds[1]:
+                return
+            canvas.manual_y_range = canvas.y_range = bounds
+        canvas.update()
+
+    @staticmethod
+    def draw(canvas, x, y, limits, engineering_limits=None):
         canvas.times, canvas.values, canvas.x_range = x, y, limits
-        finite = y[np.isfinite(y)]
-        if len(finite):
+        finite = y[np.isfinite(y) & (x >= limits[0]) & (x <= limits[1])]
+        if engineering_limits is not None:
+            canvas.default_y_range = engineering_limits
+        elif len(finite):
             low, high = float(finite.min()), float(finite.max())
             margin = max((high - low) * .08, abs(low) * .01, 1e-9)
-            canvas.y_range = (low - margin, high + margin)
+            canvas.default_y_range = (low - margin, high + margin)
+        else:
+            canvas.default_y_range = (-1., 1.)
+        canvas.y_range = canvas.manual_y_range or canvas.default_y_range
         canvas.update()
 
 
@@ -111,6 +156,7 @@ class BridgeDashboard(QScrollArea):
         self.origin = None
         self.last_timestamp = None
         self.sample_rate = 1000
+        self.frequency_max = 500
         self.filter = None
         self.mode = 'Tempo'
         self.columns = 2
@@ -123,6 +169,7 @@ class BridgeDashboard(QScrollArea):
 
     def configure(self, config):
         self.sample_rate = config.sample_rate
+        self.frequency_max = config.high_cut if config.bandpass_enabled else config.sample_rate / 2
         self.filter = (StreamingBandpass(config.sample_rate, config.low_cut, config.high_cut,
                                         len(config.enabled_channels)) if config.bandpass_enabled else None)
 
@@ -200,12 +247,12 @@ class BridgeDashboard(QScrollArea):
             y = values[i] if len(values) > i else np.array([])
             finite = y[np.isfinite(y)]
             panel.stats.setText(f'RMS: {np.sqrt(np.mean(finite ** 2)):.4g}     Pico absoluto: {np.max(np.abs(finite)):.4g}     Média: {np.mean(finite):.4g}' if len(finite) else 'RMS: —     Pico absoluto: —     Média: —')
-            panel.draw(panel.plots[0][1], times, y, (end - self.buffer.seconds, end))
+            panel.draw(panel.plots[0][1], times, y, (end - self.buffer.seconds, end), panel.time_limits)
             if self.mode != 'Tempo':
                 # Use only the contiguous finite tail for spectral estimates.
                 invalid = np.flatnonzero(~np.isfinite(y))
                 tail = y[invalid[-1] + 1:] if len(invalid) else y
                 f, a, pf, psd = spectra(tail, self.sample_rate)
-                panel.draw(panel.plots[1][1], f, a, (0, self.sample_rate / 2))
-                panel.draw(panel.plots[2][1], pf, psd, (0, self.sample_rate / 2))
+                panel.draw(panel.plots[1][1], f, a, (0, self.frequency_max))
+                panel.draw(panel.plots[2][1], pf, psd, (0, self.frequency_max))
         self.dirty = False

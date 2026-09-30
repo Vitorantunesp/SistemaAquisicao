@@ -17,6 +17,10 @@ incluído no ZIP não foi copiado, pois contém caminhos e executáveis de outra
    não alteram a frequência de aquisição. Use uma coluna para ampliar os três gráficos no modo Todos.
 6. Pare antes de alterar canais, frequência ou filtro. É possível iniciar novamente sem reconectar.
 
+Arraste a barra horizontal entre o painel da ponte e os gráficos para distribuir
+a altura entre as duas áreas. O ajuste pode ser feito durante a aquisição;
+os botões superiores permanecem acessíveis e a imagem acompanha o tamanho disponível.
+
 ## Medidas e processamento
 
 - Nomes e unidades vêm do equipamento. O programa não transforma automaticamente volts em aceleração:
@@ -33,7 +37,17 @@ incluído no ZIP não foi copiado, pois contém caminhos e executáveis de outra
   segmentos de até 4096 amostras, sobreposição de 50%, remoção da média e unidade sensor²/Hz.
   A integral da PSD estima a variância do sinal. Não se trata de espectrograma tempo-frequência.
 - Análises espectrais precisam de pelo menos oito amostras válidas consecutivas.
-  Os gráficos de frequência vão de zero a Nyquist. Não há interpolação de amostras perdidas.
+  Os gráficos de frequência vão de zero ao corte superior quando o passa-banda está ativo;
+  sem filtro, vão até Nyquist (fs/2). Não há interpolação de amostras perdidas.
+- O eixo vertical do sinal no tempo usa os limites de engenharia inferior e superior
+  lidos de cada canal (incluindo os acelerômetros). Se não houver limites válidos,
+  usa escala automática. FFT e PSD têm escala vertical automática própria,
+  calculada sobre a faixa de frequência visível.
+- Cada gráfico possui **Zoom Y +**, **−** e **Restaurar**. O botão + reduz a faixa
+  vertical pela metade, ampliando o sinal; − dobra a faixa. O ajuste é independente
+  por canal e por gráfico, permanece durante as atualizações e não altera as amostras
+  nem o CSV. Restaurar recupera os limites do canal no tempo e a escala automática
+  na FFT/PSD. Uma nova aquisição reinicia esses ajustes.
 - **Limpar gráficos** apaga somente o histórico visual; mantém o tempo da sessão, o estado do
   filtro, a contagem e a gravação. Não apaga os arquivos.
 - CSV mantém os dados originais nas unidades de engenharia, sem o filtro de visualização.

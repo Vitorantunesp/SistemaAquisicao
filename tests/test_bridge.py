@@ -135,6 +135,58 @@ class BridgeTests(unittest.TestCase):
         plot.timer.stop()
         plot.deleteLater()
 
+    def test_frequency_axes_follow_active_filter_and_return_to_nyquist(self):
+        from ads1800_app.ui.bridge_plots import BridgeDashboard
+        plot = BridgeDashboard()
+        self.addCleanup(plot.deleteLater)
+        self.addCleanup(plot.timer.stop)
+        for active, expected in ((True, 80), (False, 500)):
+            config = MonitorConfig(bandpass_enabled=active, low_cut=5, high_cut=80)
+            plot.configure(config)
+            plot.reset(config.enabled_channels)
+            plot.set_mode('Todos')
+            t = np.arange(1000) / 1000
+            plot.append(t, [np.sin(2 * np.pi * 30 * t)])
+            plot.refresh()
+            for _, canvas in plot.panels[0].plots[1:]:
+                self.assertEqual(canvas.x_range, (0, expected))
+                # Axis clipping must not alter the computed spectrum.
+                self.assertEqual(canvas.times[-1], 500)
+
+    def test_engineering_limits_and_independent_zoom_survive_new_samples(self):
+        from ads1800_app.config import ChannelConfig
+        from ads1800_app.ui.bridge_plots import BridgeDashboard
+        plot = BridgeDashboard()
+        self.addCleanup(plot.deleteLater)
+        self.addCleanup(plot.timer.stop)
+        channels = [ChannelConfig(0, enabled=True, unit='g', engineering_min=-20, engineering_max=80),
+                    ChannelConfig(1, enabled=True, unit='m/s²', engineering_min=-500, engineering_max=500)]
+        plot.configure(MonitorConfig(channels=channels))
+        plot.reset(channels)
+        plot.set_mode('Todos')
+        panel = plot.panels[0]
+        time_canvas = panel.plots[0][1]
+        self.assertEqual(time_canvas.y_range, (-20, 80))
+        panel.scale_buttons[0]['+'].click()
+        self.assertEqual(time_canvas.y_range, (5, 55))
+        t = np.arange(1000) / 1000
+        plot.append(t, [200 * np.sin(2 * np.pi * 30 * t), np.ones(1000)])
+        plot.refresh()
+        self.assertEqual(time_canvas.y_range, (5, 55))
+        self.assertEqual(plot.panels[1].plots[0][1].y_range, (-500, 500))
+        self.assertGreater(np.max(time_canvas.values), 190)
+        fft = panel.plots[1][1]
+        original = fft.y_range
+        panel.scale_buttons[1]['+'].click()
+        self.assertAlmostEqual(fft.y_range[1] - fft.y_range[0], (original[1] - original[0]) / 2)
+        panel.scale_buttons[0]['−'].click()
+        self.assertEqual(time_canvas.y_range, (-20, 80))
+        panel.scale_buttons[0]['+'].click()
+        panel.scale_buttons[0]['Restaurar'].click()
+        panel.scale_buttons[1]['Restaurar'].click()
+        self.assertEqual(time_canvas.y_range, (-20, 80))
+        self.assertEqual(fft.y_range, original)
+
 
 if __name__ == '__main__':
     unittest.main()
