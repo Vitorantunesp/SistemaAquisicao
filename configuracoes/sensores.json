@@ -7,7 +7,12 @@
       "manufacturer": "",
       "model": "",
       "serial_number": "",
-      "sensitivity": "",
+      "input_type": "IEPE / CCP",
+      "input_scale": "-10 V ... +10V",
+      "input_min": null,
+      "input_max": null,
+      "input_unit": "V",
+      "sensitivity": "523,92",
       "sensitivity_unit": "mV/g",
       "unit": "g",
       "gain": 1.0,
@@ -15,6 +20,26 @@
       "notes": "",
       "parameters": {},
       "id": "bab5fb9d-e99c-4f64-9f33-ebb2c5b8524e"
+    },
+    {
+      "name": "Martelo",
+      "sensor_type": "Martelo de impacto",
+      "manufacturer": "",
+      "model": "",
+      "serial_number": "",
+      "input_type": "IEPE / CCP",
+      "input_scale": "-333,3 mV ... +333,3 mV",
+      "input_min": null,
+      "input_max": null,
+      "input_unit": "V",
+      "sensitivity": "47,57",
+      "sensitivity_unit": "mV/lbF",
+      "unit": "lbf",
+      "gain": 1.0,
+      "offset": 0.0,
+      "notes": "",
+      "parameters": {},
+      "id": "6d8697e6-ecb6-497c-8d9c-bfa099de9b47"
     }
   ]
 }

@@ -1,5 +1,6 @@
 # Ambiente virtual e arquivos gerados pelo Python
 .venv/
+.venv-ponte/
 venv/
 __pycache__/
 *.py[cod]
