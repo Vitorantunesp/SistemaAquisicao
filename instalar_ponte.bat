@@ -14,7 +14,7 @@ if errorlevel 1 goto :erro
 :dependencias
 ".venv-ponte\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto :erro
-".venv-ponte\Scripts\python.exe" -c "from PyQt6.QtWidgets import QApplication; from scipy.signal import butter, sosfilt, welch; import numpy"
+".venv-ponte\Scripts\python.exe" -c "from PyQt6.QtWidgets import QApplication; from scipy.signal import butter, sosfilt, welch; import numpy; import pywt"
 if errorlevel 1 goto :erro
 echo Instalacao concluida. Abra iniciar_ponte.bat.
 pause

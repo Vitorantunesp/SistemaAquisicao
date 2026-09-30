@@ -19,6 +19,11 @@ FFT, PSD, RMS, pico e média. Instale as dependências com `instalar.bat` se nec
 **iniciar.bat** e `main.py` continuam abrindo a interface de aquisição original.
 Veja [as instruções do monitoramento](MONITORAMENTO_PONTE.md).
 
+O monitoramento inclui **Aquisição automática**: configure o trigger, pré-trigger,
+duração total e frequências em **Configurar trigger…**. Qualquer canal dispara uma
+captura conjunta; ao final, aparecem os escalogramas Morlet complexa. Capturas são
+salvas automaticamente em `dados/capturas/`. O PyWavelets foi adicionado às dependências.
+
 1. Na aba **Conexao**, escolha `ADS 1800 real`, informe o IP e conecte. O endereco padrao documentado pela LYNX e `192.168.1.180`.
 2. Na aba **Canais e experimento**, marque os canais que serão lidos. Nomes, unidades e limites vêm do equipamento; passe o mouse sobre a caixa para consultar os limites.
 3. Escolha uma frequencia aceita pelo equipamento. Depois da conexao, a lista e substituida pelas frequencias informadas pelo proprio ADS 1800.

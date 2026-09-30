@@ -13,6 +13,13 @@ class MonitorConfig(ExperimentConfig):
     high_cut: float = 100.0
     bridge_image: str = 'assets/ponte_sem_fundo.png'
     sensor_positions: dict = field(default_factory=dict)
+    automatic_enabled: bool = False
+    trigger_percent: float = 10.0
+    trigger_thresholds: dict = field(default_factory=dict)
+    pre_trigger: float = 1.0
+    capture_duration: float = 6.0
+    wavelet_min: float = 5.0
+    wavelet_max: float = 100.0
 
     def validate(self):
         ExperimentConfig.validate(self)
@@ -25,6 +32,9 @@ class MonitorConfig(ExperimentConfig):
                 raise ValueError('Posições dos sensores inválidas.')
         if self.bandpass_enabled:
             validate_bandpass(self.sample_rate, self.low_cut, self.high_cut)
+        if self.automatic_enabled:
+            from ads1800_app.automatic import validate_automatic
+            validate_automatic(self)
 
 
 def validate_bandpass(fs, low, high):

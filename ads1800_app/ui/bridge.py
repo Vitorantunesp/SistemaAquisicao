@@ -5,13 +5,16 @@ from pathlib import Path
 import sys
 import time
 import json
+import queue
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDoubleSpinBox, QSpinBox, QComboBox,
                             QFormLayout, QGroupBox, QHBoxLayout, QVBoxLayout, QLabel,
                             QPushButton, QFileDialog, QDialog, QDialogButtonBox, QMessageBox,
-                            QWidget, QSplitter)
+                            QWidget, QSplitter, QStackedWidget)
 from ads1800_app.config import ExperimentConfig
 from ads1800_app.monitor_signal import MonitorConfig
+from ads1800_app.automatic import TriggerRecorder, CaptureAnalysis
+from ads1800_app.ui.automatic import TriggerDialog, EventViewer, AUTOMATIC_FIELDS
 from ads1800_app.ui.app import Ads1800App
 from ads1800_app.ui.bridge_plots import BridgeDashboard, BridgeMap
 from ads1800_app.ui.bridge_image import (DEFAULT_IMAGE, PROJECT_ROOT, import_image,
@@ -24,6 +27,11 @@ class BridgeApp(Ads1800App):
         self._last_received = None
         self._bridge_image = DEFAULT_IMAGE
         self._sensor_positions = {}
+        defaults = MonitorConfig()
+        self._automatic_options = {name: getattr(defaults, name) for name in AUTOMATIC_FIELDS}
+        self._recorder = None
+        self._analysis = None
+        self._automatic_error = ''
         self._visual_preferences = PROJECT_ROOT / 'configuracoes' / 'ponte_visual.json'
         super().__init__()
         self._restore_visual_preferences()
@@ -114,6 +122,14 @@ class BridgeApp(Ads1800App):
         self.state_label = QLabel('● Desconectado')
         for label in (self.clock, self.rate_label, self.duration_label, self.elapsed, self.state_label):
             info_layout.addWidget(label)
+        automatic_row = QHBoxLayout()
+        self.automatic_enabled = QCheckBox('Aquisição automática')
+        automatic_row.addWidget(self.automatic_enabled)
+        self.trigger_button = self._button('Configurar trigger…', self._configure_trigger, automatic_row)
+        info_layout.addLayout(automatic_row)
+        self.capture_status = QLabel('Captura automática desativada.')
+        self.capture_status.setWordWrap(True)
+        info_layout.addWidget(self.capture_status)
         top.addWidget(info, 3)
         controls = QGroupBox('Controles')
         control_layout = QVBoxLayout(controls)
@@ -157,11 +173,15 @@ class BridgeApp(Ads1800App):
         self.time_window.valueChanged.connect(self.plot.set_window)
         self.refresh_rate.valueChanged.connect(self.plot.set_refresh_rate)
         self.plot_columns.currentIndexChanged.connect(lambda i: self.plot.set_columns(i + 1))
-        layout.addWidget(self.plot, 1)
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(self.plot)
+        self.event_viewer = EventViewer()
+        self.view_stack.addWidget(self.event_viewer)
+        layout.addWidget(self.view_stack, 1)
         modes = QHBoxLayout()
         modes.addWidget(QLabel('Visualização'))
         self.mode_buttons = {}
-        for mode in ('Tempo', 'FFT', 'Espectro', 'Todos'):
+        for mode in ('Tempo', 'FFT', 'Espectro', 'Todos', 'Escalogramas'):
             button = QPushButton('Espectro (PSD)' if mode == 'Espectro' else mode)
             button.setCheckable(True)
             button.setChecked(mode == 'Tempo')
@@ -169,7 +189,7 @@ class BridgeApp(Ads1800App):
             modes.addWidget(button)
             self.mode_buttons[mode] = button
         modes.addStretch()
-        layout.addLayout(modes)
+        layout.insertLayout(layout.indexOf(self.view_stack), modes)
         layout.addWidget(self.plot.live_status)
         self.recording_label = QLabel('Aquisição parada. Selecione os canais na guia Configurações.')
         layout.addWidget(self.recording_label)
@@ -177,7 +197,30 @@ class BridgeApp(Ads1800App):
     def _set_mode(self, mode):
         for name, button in self.mode_buttons.items():
             button.setChecked(name == mode)
-        self.plot.set_mode(mode)
+        self.view_stack.setCurrentIndex(1 if mode == 'Escalogramas' else 0)
+        if mode != 'Escalogramas':
+            self.plot.set_mode(mode)
+
+    def _configure_trigger(self):
+        if self._busy or (self.controller and self.controller.running):
+            return
+        try:
+            base = super()._read_config()
+            config = MonitorConfig(**{f.name: getattr(base, f.name) for f in fields(ExperimentConfig)},
+                                   **self._automatic_options)
+            dialog = TriggerDialog(config, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                updated = dialog.read_config()
+                self._automatic_options = {name: getattr(updated, name) for name in AUTOMATIC_FIELDS}
+                self.statusBar().showMessage('Trigger configurado. Ative Aquisição automática para usá-lo.')
+        except Exception as exc:
+            self._show_error(exc)
+
+    def _refresh_controls(self):
+        super()._refresh_controls()
+        enabled = not self._busy and not (self.controller and self.controller.running)
+        self.automatic_enabled.setEnabled(enabled)
+        self.trigger_button.setEnabled(enabled)
 
     def _show_device_channels(self, channels):
         super()._show_device_channels(channels)
@@ -266,6 +309,7 @@ class BridgeApp(Ads1800App):
         config = MonitorConfig(**{f.name: getattr(base, f.name) for f in fields(ExperimentConfig)},
                                bandpass_enabled=self.filter_enabled.isChecked(),
                                low_cut=self.low_cut.value(), high_cut=self.high_cut.value(),
+                               automatic_enabled=self.automatic_enabled.isChecked(), **self._automatic_options,
                                bridge_image=self._bridge_image,
                                sensor_positions={key: list(xy) for key, xy in self._sensor_positions.items()})
         config.validate()
@@ -288,6 +332,9 @@ class BridgeApp(Ads1800App):
         self.filter_enabled.setChecked(getattr(config, 'bandpass_enabled', False))
         self.low_cut.setValue(getattr(config, 'low_cut', 1))
         self.high_cut.setValue(getattr(config, 'high_cut', 100))
+        defaults = MonitorConfig()
+        self._automatic_options = {name: getattr(config, name, getattr(defaults, name)) for name in AUTOMATIC_FIELDS}
+        self.automatic_enabled.setChecked(getattr(config, 'automatic_enabled', False))
         self._update_map()
 
     def _load_config(self):
@@ -313,10 +360,20 @@ class BridgeApp(Ads1800App):
         try:
             config = self._read_config()
             self.plot.configure(config)
+            recorder = TriggerRecorder(config) if config.automatic_enabled else None
+            if config.automatic_enabled:
+                import pywt  # Validate installation before starting hardware acquisition.
         except Exception as exc:
             self._show_error(exc)
             return
         self._active_rate = config.sample_rate
+        if self._analysis:
+            self._analysis.close()
+        self._recorder = recorder
+        self._automatic_error = ''
+        self._analysis = (CaptureAnalysis(config, PROJECT_ROOT / 'dados' / 'capturas' /
+                         datetime.now().strftime('%Y%m%d_%H%M%S_%f')) if recorder else None)
+        self.event_viewer.clear()
         self._last_received = None
         self.rate_label.setText(f'Taxa de amostragem: {config.sample_rate:g} Hz')
         super()._start_acquisition()
@@ -324,6 +381,10 @@ class BridgeApp(Ads1800App):
     def _on_data(self, times, values):
         self._last_received = time.monotonic()
         super()._on_data(times, values)
+        recorder, analysis = self._recorder, self._analysis
+        if recorder and analysis and not self._automatic_error:
+            for capture in recorder.feed(times, values, allow_trigger=not analysis.busy.is_set()):
+                analysis.submit(capture)
 
     def _process_events(self):
         super()._process_events()
@@ -337,6 +398,38 @@ class BridgeApp(Ads1800App):
         samples = self.controller.total_samples if self.controller else 0
         seconds = int(samples / self._active_rate)
         self.duration_label.setText(f'Tempo adquirido: {seconds // 3600:02}:{seconds // 60 % 60:02}:{seconds % 60:02}')
+        if self._analysis:
+            try:
+                result = self._analysis.results.get_nowait()
+            except queue.Empty:
+                result = None
+            if result:
+                if result[0] == 'ready':
+                    _, capture, scalograms, path = result
+                    self.event_viewer.add_event(capture, scalograms, path, self._analysis.config.enabled_channels)
+                    self._set_mode('Escalogramas')
+                    self.statusBar().showMessage(f'Captura {capture.number:03d} salva. Escalogramas concluídos.')
+                else:
+                    self._automatic_error = f'Captura automática suspensa: {result[1]}'
+                    self._show_error(self._automatic_error)
+                self._analysis.busy.clear()
+        recorder = self._recorder
+        if recorder:
+            if not running and not self._busy and recorder.parts is not None:
+                recorder.discarded += 1
+                recorder.reset()
+            status = ('Calculando escalogramas · novos triggers suspensos' if self._analysis.busy.is_set() else
+                      recorder.state if running else 'Captura automática parada')
+            self.capture_status.setText(self._automatic_error or
+                f'{status}\n{recorder.number} capturas completas · {recorder.discarded} incompletas descartadas')
+        else:
+            self.capture_status.setText('Aquisição automática selecionada · inicie a aquisição.'
+                                        if self.automatic_enabled.isChecked() else 'Captura automática desativada.')
+
+    def closeEvent(self, event):
+        super().closeEvent(event)
+        if event.isAccepted() and self._analysis:
+            self._analysis.close()
 
 
 def run():

@@ -61,6 +61,75 @@ O JSON da nova interface inclui bandpass_enabled, low_cut e high_cut. Use arquiv
 (por exemplo, ponte.json) dos arquivos usados pela interface antiga, que não conhece esses campos.
 A nova interface também lê configurações antigas; nesse caso o filtro começa desativado.
 
+## Aquisição automática e escalogramas
+
+1. Conecte, selecione os canais e a taxa de amostragem.
+2. Na aba Monitoramento, abra **Configurar trigger…** e marque **Aquisição automática**.
+3. O padrão por canal é `0,10 × abs(limite superior de engenharia)` lido do equipamento.
+   O valor absoluto da amostra é comparado a esse limiar: picos positivos e negativos disparam.
+   O percentual é ajustável; desmarque **Usar percentual** para informar um limiar individual
+   na unidade daquele canal. Uma escala superior nula ou ausente exige limiar explícito.
+4. Configure **Pré-trigger** e **Duração total**, que inclui o pré-trigger. Por exemplo,
+   1 s de pré-trigger e 6 s totais capturam 1 s antes e 5 s a partir do disparo.
+   Os tempos são arredondados à amostra mais próxima. O instante do trigger é `t = 0`.
+5. Defina as frequências mínima e máxima da Morlet, com `0 < mínima < máxima < fs/2`.
+   Essa faixa é independente do filtro passa-banda do monitoramento.
+6. Inicie a aquisição. O sistema primeiro preenche o histórico e aguarda um cruzamento
+   de limiar. **Qualquer canal dispara todos os canais selecionados, sincronizados**.
+   Para medir aceleração em g ou m/s², configure essas unidades e a calibração no ADS 1800;
+   a aplicação não converte automaticamente canais configurados em V.
+7. Ao concluir a captura, o sinal é salvo e a Morlet é calculada em segundo plano.
+   A visualização muda para **Escalogramas**, com seleção de evento, sinal no tempo e
+   um mapa tempo–frequência por canal. Os modos Tempo/FFT/PSD/Todos continuam disponíveis.
+
+O trigger e os escalogramas usam o sinal original em unidades de engenharia, **sem o
+passa-banda de visualização**. O monitoramento e o CSV contínuo mantêm seu funcionamento.
+As configurações automáticas são bloqueadas durante a aquisição e entram no JSON do
+experimento; arquivos antigos iniciam com o modo automático desativado.
+
+### Rearme, continuidade e armazenamento
+
+- Um cruzamento é a passagem de abaixo do limiar para valor absoluto maior ou igual a ele.
+  Um nível sustentado não produz capturas repetidas; o canal precisa baixar e cruzar novamente.
+  Outro canal pode disparar mesmo se o primeiro continuar acima de seu limiar.
+- Não há capturas sobrepostas. Durante uma captura e seu cálculo, novos disparos são
+  ignorados; o monitoramento continua e o histórico de pré-trigger continua sendo atualizado.
+  Após exibir o resultado, o trigger é rearmado automaticamente para o próximo cruzamento.
+- Lacunas temporais e amostras não finitas invalidam a captura em andamento. O histórico é
+  reiniciado, sem interpolação, e a interface mostra a contagem de capturas incompletas.
+  Parar uma aquisição também descarta a captura incompleta. Capturas completas continuam
+  sendo processadas após Parar; fechar o aplicativo ou iniciar outra sessão cancela cálculos
+  pendentes, preservando o sinal original já salvo.
+- Cada sessão cria `dados/capturas/AAAAMMDD_HHMMSS_microssegundos/`. Os arquivos
+  `evento_0001.npz` contêm `times` (segundos relativos ao trigger), `values`
+  (canais × amostras originais) e `metadata` (JSON com horário do trigger, canais,
+  taxa, limiares, nomes, unidades e limites). `configuracao.json` registra a configuração.
+- `evento_0001_morlet.npz` contém `frequencies`, `times`, `power`, `analysis_rate` e `wavelet`.
+  `power` armazena |CWT|² antes da normalização visual, na grade reduzida de exibição.
+  Os arquivos podem ser abertos com `numpy.load(..., allow_pickle=False)`.
+- A tela conserva os últimos três eventos da sessão. Todos os eventos concluídos ficam
+  no disco. Falha de gravação ou de análise suspende novos disparos e exibe um erro;
+  o monitoramento continua. Uma nova aquisição reinicia o estado automático.
+- Limites operacionais: até 120 s e 64 MB de amostras por evento; a janela e a faixa
+  precisam fornecer ao menos oito amostras para análise. A interface valida antes de iniciar.
+
+### Método da wavelet
+
+Usa a CWT do PyWavelets com **Morlet complexa `cmor1.5-1.0`**, largura de banda 1,5 e
+frequência central 1,0. As escalas são convertidas das frequências em Hz usando o período
+de amostragem. Referência: [documentação oficial da CWT](https://pywavelets.readthedocs.io/en/latest/ref/cwt.html).
+
+A média é removida para a análise. Quando possível, somente o sinal de análise é
+reamostrado com filtro antialias, mantendo taxa de pelo menos quatro vezes a frequência
+máxima solicitada; as amostras salvas e o trigger mantêm a taxa original. A transformação
+é calculada em 96 frequências lineares, uma frequência por vez para limitar a memória.
+O mapa tem até 1200 colunas temporais, preservando a potência máxima de cada intervalo
+quando há redução. Cores mostram potência relativa de 0 a 1, normalizada pelo máximo de
+cada canal; não devem ser usadas para comparar amplitudes entre canais. As bordas da
+janela têm maior incerteza por suporte incompleto da wavelet. Não é uma PSD calibrada.
+
+Dependência adicional: `PyWavelets>=1.6,<2`, incluída em requirements.txt.
+
 ## Imagem da ponte e posição dos sensores
 
 1. A imagem tratada já vem selecionada em `assets/ponte_sem_fundo.png`.
