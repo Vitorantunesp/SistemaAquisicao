@@ -6,7 +6,7 @@ import numpy as np
 from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import (QCheckBox, QDoubleSpinBox, QGridLayout, QHBoxLayout,
-                            QLabel, QMdiArea, QMdiSubWindow, QVBoxLayout, QWidget)
+                            QLabel, QMdiArea, QMdiSubWindow, QToolTip, QVBoxLayout, QWidget)
 
 COLORS = ('#2563eb', '#dc2626', '#16a34a', '#9333ea', '#ea580c', '#0891b2', '#4f46e5', '#be123c')
 
@@ -68,25 +68,55 @@ class ChannelCanvas(QWidget):
         self.values = np.array([])
         self.x_range = (0, 10)
         self.y_range = (-1, 1)
+        self.x_label = 'Tempo [s]'
+        self.setMouseTracking(True)
+
+    def plot_rect(self):
+        height = self.fontMetrics().height()
+        return QRectF(85, 12, max(1, self.width()-105),
+                      max(1, self.height()-12-(2*height+20)))
+
+    def mouseMoveEvent(self, event):
+        rect = self.plot_rect()
+        if rect.contains(event.position()) and len(self.times):
+            x = self.x_range[0] + (event.position().x()-rect.left())/rect.width()*(self.x_range[1]-self.x_range[0])
+            index = int(np.argmin(abs(self.times-x)))
+            unit = 'Hz' if self.x_label == 'Frequência [Hz]' else 's'
+            QToolTip.showText(event.globalPosition().toPoint(),
+                             f'{self.times[index]:.6g} {unit}\nValor: {self.values[index]:.6g}', self)
+        else:
+            QToolTip.hideText()
+        super().mouseMoveEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor('white'))
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        left, top, right, bottom = 85, 12, self.width() - 20, self.height() - 32
-        rect = QRectF(left, top, right - left, bottom - top)
+        rect = self.plot_rect()
+        left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
+        text_height = self.fontMetrics().height()+4
         x0, x1 = self.x_range
         y0, y1 = self.y_range
         for i in range(5):
             fraction = i / 4
             y = top + rect.height() * fraction
-            x = left + rect.width() * fraction
             painter.setPen(QColor('#e2e8f0'))
             painter.drawLine(QPointF(left, y), QPointF(right, y))
-            painter.drawLine(QPointF(x, top), QPointF(x, bottom))
             painter.setPen(QColor('#475569'))
             painter.drawText(QRectF(0, y - 9, left - 8, 18), Qt.AlignmentFlag.AlignRight, f'{y1 - (y1 - y0) * fraction:.4g}')
-            painter.drawText(QRectF(x - 40, bottom + 6, 80, 20), Qt.AlignmentFlag.AlignCenter, f'{x0 + (x1 - x0) * fraction:.3f}')
+        # Reserve space from actual font metrics; endpoint labels stay inside the widget.
+        label_width = max(self.fontMetrics().horizontalAdvance(f'{v:.6g}') for v in np.linspace(x0, x1, 5))+16
+        intervals = max(1, min(4, int(rect.width()/label_width)))
+        for i in range(intervals+1):
+            x = left+rect.width()*i/intervals
+            painter.setPen(QColor('#e2e8f0'))
+            painter.drawLine(QPointF(x, top), QPointF(x, bottom))
+            painter.setPen(QColor('#334155'))
+            label_left = max(0, min(x-label_width/2, self.width()-label_width))
+            painter.drawText(QRectF(label_left, bottom+4, label_width, text_height),
+                             Qt.AlignmentFlag.AlignCenter, f'{x0+(x1-x0)*i/intervals:.6g}')
+        painter.drawText(QRectF(left, bottom+text_height+5, rect.width(), text_height),
+                         Qt.AlignmentFlag.AlignCenter, self.x_label)
         if not len(self.times):
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, 'Aguardando amostras...')
             return

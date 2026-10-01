@@ -227,6 +227,7 @@ class ModalApp(QMainWindow):
             box.setContentsMargins(0, 0, 0, 0)
             box.addWidget(QLabel(label))
             canvas = ChannelCanvas('#2563eb' if index % 2 == 0 else '#16a34a')
+            canvas.x_label = 'Tempo [s]' if key in ('force', 'acceleration') else 'Frequência [Hz]'
             canvas.setMinimumSize(260, 140)
             box.addWidget(canvas)
             self.plots[key] = canvas

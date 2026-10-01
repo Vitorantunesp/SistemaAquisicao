@@ -16,6 +16,7 @@ from ads1800_app.ui.plots import ChannelCanvas, envelope_indices
 class Comparison(ChannelCanvas):
     def __init__(self):
         super().__init__('#2563eb')
+        self.x_label = 'Frequência [Hz]'
         self.model = np.array([])
 
     def paintEvent(self, event):
@@ -24,13 +25,14 @@ class Comparison(ChannelCanvas):
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        left, top, right, bottom = 85, 12, self.width()-20, self.height()-32
-        p.setClipRect(QRectF(left, top, right-left, bottom-top))
+        rect = self.plot_rect()
+        left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
+        p.setClipRect(rect)
         p.setPen(QPen(QColor('#e87916'), 1.5, Qt.PenStyle.DashLine))
         x0, x1 = self.x_range
         y0, y1 = self.y_range
         points = QPolygonF()
-        for i in envelope_indices(self.model, max(1, right-left)):
+        for i in envelope_indices(self.model, max(1, int(right-left))):
             if not np.isfinite(self.model[i]):
                 p.drawPolyline(points)
                 points = QPolygonF()
