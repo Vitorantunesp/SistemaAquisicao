@@ -12,6 +12,13 @@ O projeto inclui uma copia dos modulos Python fornecidos pela LYNX em `vendor/ly
 
 ## Uso
 
+Para ensaios modais por impacto, abra **iniciar_modal.bat**. O programa separado
+inclui geometria plana, pontos de impacto livres, acelerômetro fixo, trigger,
+janelamento, FFTs, FRF H1, coerência e revisão das batidas, com simulador próprio.
+Na terceira aba, o pós-processamento estima frequências naturais, amortecimentos
+e formas modais relativas, com animação dos pontos medidos e exportação dos resultados.
+Consulte [o guia de análise modal](ANALISE_MODAL.md) para configuração e arquivos.
+
 A interface de monitoramento da ponte foi incorporada de `MonitorPonte.zip`.
 Abra **iniciar_ponte.bat** (ou execute `monitorar_ponte.py` no PyCharm) para
 usar a imagem da ponte, posicionar sensores, aplicar o passa-banda e consultar
