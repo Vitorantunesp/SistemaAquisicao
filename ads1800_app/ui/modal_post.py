@@ -298,11 +298,14 @@ class PostPanel(QWidget):
             return
         i = self.point.currentIndex()
         r = self.result
-        mask = (r['frequency'] >= r['settings']['fmin']) & (r['frequency'] <= r['settings']['fmax'])
+        maximum = r['settings']['fmax']
+        if self.session.config.bandpass_enabled:
+            maximum = min(maximum, self.session.config.high_cut)
+        mask = (r['frequency'] >= r['settings']['fmin']) & (r['frequency'] <= maximum)
         x, y, fit = r['frequency'][mask], abs(r['measured'][i, mask]), abs(r['fitted'][i, mask])
         canvas = self.comparison
         canvas.times, canvas.values, canvas.model = x, y, fit
-        canvas.x_range = (float(x[0]), float(x[-1]))
+        canvas.x_range = (r['settings']['fmin'], maximum)
         valid = np.r_[y[np.isfinite(y)], fit[np.isfinite(fit)]]
         canvas.y_range = (0, max(float(valid.max())*1.1, 1e-12))
         canvas.update()

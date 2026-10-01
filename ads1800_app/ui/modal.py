@@ -445,9 +445,16 @@ class ModalApp(QMainWindow):
 
     def plot(self, key, x, y, fixed=None):
         canvas = self.plots[key]
-        canvas.times, canvas.values = np.asarray(x), np.asarray(y)
-        if len(x) > 1:
+        x, y = np.asarray(x), np.asarray(y)
+        spectral = key in ('fft_force', 'fft_acceleration', 'frf', 'phase', 'coherence')
+        if spectral and self.session and self.session.config.bandpass_enabled:
+            maximum = self.session.config.high_cut
+            visible = (x >= 0) & (x <= maximum)
+            x, y = x[visible], y[visible]
+            canvas.x_range = (0, maximum)
+        elif len(x) > 1:
             canvas.x_range = (float(x[0]), float(x[-1]))
+        canvas.times, canvas.values = x, y
         valid = np.asarray(y)[np.isfinite(y)]
         if fixed:
             canvas.y_range = fixed
