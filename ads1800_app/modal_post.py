@@ -13,7 +13,7 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.signal import find_peaks
 
-from ads1800_app.modal import ensemble
+from ads1800_app.modal import ensemble, processed_signals
 
 
 @dataclass
@@ -53,6 +53,8 @@ def prepare_data(session, settings):
     """Rebuild only accepted ensembles, using original SI records, not old windows."""
     c = session.config
     settings.validate(c.sample_rate/2)
+    if c.bandpass_enabled and not c.low_cut <= settings.fmin < settings.fmax <= c.high_cut:
+        raise ValueError(f'A faixa do ajuste deve ficar dentro do passa-banda do ensaio ({c.low_cut:g} a {c.high_cut:g} Hz).')
     alpha = -np.log(settings.exponential_end)/((c.n-1)/c.sample_rate)
     window = np.exp(-alpha*np.arange(c.n)/c.sample_rate)
     ids, counts, frfs, coherences, sources, warnings = [], [], [], [], [], []
@@ -67,9 +69,7 @@ def prepare_data(session, settings):
                 f, a = saved['force_N'].copy(), saved['acceleration_m_s2'].copy()
             if f.shape != (c.n,) or a.shape != (c.n,) or not np.isfinite([f, a]).all():
                 raise ValueError(f'{name}: captura inválida.')
-            baseline = max(1, c.pre//2)
-            f -= np.mean(f[:baseline])
-            a -= np.mean(a[:baseline])
+            f, a = processed_signals(c, f, a)
             hits.append({'F': np.fft.rfft(f*window), 'A': np.fft.rfft(a*window)})
             sources.append({'point': name, 'file': record['file']})
             if record.get('issues'):
@@ -87,6 +87,8 @@ def prepare_data(session, settings):
         warnings.append('Menos de três pontos: visualização espacial limitada aos pontos medidos.')
     if settings.exponential_end == 1:
         warnings.append('Sem exponencial: confira se os sinais decaem completamente no registro.')
+    if c.bandpass_enabled:
+        warnings.append(f'Passa-banda comum de {c.low_cut:g} a {c.high_cut:g} Hz aplicado antes da exponencial. Confira transientes e decaimento.')
     return ModalData(freq, np.asarray(frfs), np.asarray(coherences), ids, counts,
                      float(alpha), list(dict.fromkeys(warnings)), sources)
 

@@ -11,7 +11,7 @@ import uuid
 import numpy as np
 from PyQt6.QtCore import QPointF, Qt, QTimer
 from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
-from PyQt6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QFileDialog,
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QSpinBox, QTabWidget, QTextEdit,
     QVBoxLayout, QWidget, QSplitter, QTableWidget, QTableWidgetItem)
@@ -20,7 +20,8 @@ from ads1800_app.backends.lynx import LynxBackend
 from ads1800_app.backends.modal_simulator import ModalSimulatorBackend
 from ads1800_app.config import ADS1800_SAMPLE_RATES, ExperimentConfig
 from ads1800_app.controller import AcquisitionController
-from ads1800_app.modal import ModalConfig, ImpactCapture, ModalSession, ensemble
+from ads1800_app.modal import ModalConfig, ImpactCapture, ModalSession, ensemble, processed_signals
+from ads1800_app.monitor_signal import StreamingBandpass
 from ads1800_app.ui.plots import ChannelCanvas, DisplayBuffer
 from ads1800_app.ui.modal_post import PostPanel
 
@@ -70,6 +71,7 @@ class ModalApp(QMainWindow):
         self.busy = False
         self.events = queue.Queue(maxsize=300)
         self.live = DisplayBuffer(2)
+        self.live_filter = None
         self.lost = 0
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -129,8 +131,15 @@ class ModalApp(QMainWindow):
             form.addRow(label, self.fields[key])
         self.rate = QComboBox()
         self.rate.addItems([str(v) for v in ADS1800_SAMPLE_RATES])
-        self.rate.setCurrentText('1000')
+        self.rate.setCurrentText('2000')
         form.insertRow(0, 'Amostragem [Hz]', self.rate)
+        self.bandpass = QCheckBox('Ativar filtro passa-banda em todos os resultados')
+        self.bandpass.setChecked(True)
+        form.addRow(self.bandpass)
+        for key, label, default in [('low_cut', 'Corte inferior [Hz]', 1), ('high_cut', 'Corte superior [Hz]', 500)]:
+            self.fields[key] = self.number(default, .0001, 1e6)
+            form.addRow(label, self.fields[key])
+            self.bandpass.toggled.connect(self.fields[key].setEnabled)
         for key, label, items in [('polarity', 'Polaridade do trigger', ['Absoluto', 'Positivo', 'Negativo']),
                                  ('force_window', 'Janela do martelo', ['Força', 'Retangular', 'Hann']),
                                  ('response_window', 'Janela da aceleração', ['Exponencial', 'Retangular', 'Hann'])]:
@@ -164,7 +173,9 @@ class ModalApp(QMainWindow):
         note = QLabel('Configure sensores e faixas no Assistente LYNX. Os canais já chegam em unidades de engenharia; '
                       'os fatores acima convertem apenas para SI (ex.: g → m/s²: 9,80665).\n'
                       'Janela exponencial altera o amortecimento aparente. Hann pode atenuar o impacto; '
-                      'use retangular quando toda a resposta já decai dentro do registro.')
+                      'use retangular quando toda a resposta já decai dentro do registro.\n'
+                      'Passa-banda: corte superior deve ser menor que metade da amostragem. '
+                      'Para 1–500 Hz, use mais de 1000 amostras/s (padrão: 2000). Trigger e alertas da batida usam o sinal original.')
         note.setWordWrap(True)
         layout.addWidget(note)
         row = QHBoxLayout()
@@ -289,7 +300,7 @@ class ModalApp(QMainWindow):
                     raise ValueError('Use ponto e vírgula para separar as coordenadas.')
                 result.append(([items[0]] if names else [])+[float(v.replace(',', '.')) for v in items[1 if names else 0:]])
             return result
-        c = ModalConfig(**values, sample_rate=float(self.rate.currentText()), averages=self.averages.value(),
+        c = ModalConfig(**values, bandpass_enabled=self.bandpass.isChecked(), sample_rate=float(self.rate.currentText()), averages=self.averages.value(),
                         outline=rows(self.outline), points=rows(self.points, True), accelerometer=[self.ax.value(), self.ay.value()],
                         force_channel=self.force_channel.currentData() if self.force_channel.count() else 0,
                         response_channel=self.response_channel.currentData() if self.response_channel.count() else 1)
@@ -328,7 +339,7 @@ class ModalApp(QMainWindow):
         if not path:
             return
         try:
-            c = ModalConfig(**json.loads(Path(path).read_text(encoding='utf-8')))
+            c = ModalConfig.from_dict(json.loads(Path(path).read_text(encoding='utf-8')))
             c.validate()
             if self.rate.findText(f'{c.sample_rate:g}') < 0:
                 raise ValueError('Taxa da configuração não disponível; conecte ao equipamento correspondente.')
@@ -340,6 +351,7 @@ class ModalApp(QMainWindow):
                 else:
                     widget.setValue(getattr(c, key))
             self.rate.setCurrentText(f'{c.sample_rate:g}')
+            self.bandpass.setChecked(c.bandpass_enabled)
             self.averages.setValue(c.averages)
             self.outline.setPlainText('\n'.join('; '.join(map(str, row)) for row in c.outline))
             self.points.setPlainText('\n'.join('; '.join(map(str, row)) for row in c.points))
@@ -393,6 +405,7 @@ class ModalApp(QMainWindow):
             self.indices = ([ch.number for ch in selected].index(c.force_channel), [ch.number for ch in selected].index(c.response_channel))
             self.pending = None
             self.live = DisplayBuffer(2)
+            self.live_filter = StreamingBandpass(c.sample_rate, c.low_cut, c.high_cut, 2) if c.bandpass_enabled else None
             self.history.setRowCount(0)
             for canvas in self.plots.values():
                 canvas.times, canvas.values = np.array([]), np.array([])
@@ -448,8 +461,9 @@ class ModalApp(QMainWindow):
         c = self.session.config
         with np.load(self.session.directory/record['file']) as d:
             t = (np.arange(c.n)-c.pre)/c.sample_rate
-            self.plot('force', t, d['force_N'])
-            self.plot('acceleration', t, d['acceleration_m_s2'])
+            force, acceleration = processed_signals(c, d['force_N'], d['acceleration_m_s2']) if c.bandpass_enabled else (d['force_N'], d['acceleration_m_s2'])
+            self.plot('force', t, force)
+            self.plot('acceleration', t, acceleration)
             freq = np.fft.rfftfreq(c.n, 1/c.sample_rate)
             for key, spectrum in [('fft_force', d['F']), ('fft_acceleration', d['A'])]:
                 amplitude = abs(spectrum)/c.n
@@ -470,7 +484,8 @@ class ModalApp(QMainWindow):
         self.plot('phase', f, np.angle(h1, deg=True), (-180, 180))
         self.plot('coherence', f, coh, (0, 1))
         self.progress.setText(f'{point}: {len(hits)} / {self.session.config.averages} batidas aceitas\n'
-                              + ('Coerência: precisa de ≥2 batidas.' if len(hits) < 2 else 'Médias espectrais das batidas aceitas.'))
+                              + ('Coerência: precisa de ≥2 batidas.' if len(hits) < 2 else 'Médias espectrais das batidas aceitas.')
+                              + (f'\nPassa-banda: {self.session.config.low_cut:g}–{self.session.config.high_cut:g} Hz' if self.session.config.bandpass_enabled else '\nPassa-banda desativado'))
 
     def point_changed(self):
         self.geometry.selected = self.point.currentText()
@@ -517,8 +532,12 @@ class ModalApp(QMainWindow):
         if path:
             try:
                 with np.load(self.session.directory/record['file']) as d:
-                    np.savetxt(path, np.column_stack([d['time'], d['force_N'], d['acceleration_m_s2']]),
-                               delimiter=';', header='tempo_s;forca_N;aceleracao_m_s2', comments='')
+                    columns = [d['time'], d['force_N'], d['acceleration_m_s2']]
+                    header = 'tempo_s;forca_original_N;aceleracao_original_m_s2'
+                    if self.session.config.bandpass_enabled:
+                        columns.extend(processed_signals(self.session.config, d['force_N'], d['acceleration_m_s2']))
+                        header += ';forca_filtrada_N;aceleracao_filtrada_m_s2'
+                    np.savetxt(path, np.column_stack(columns), delimiter=';', header=header, comments='')
             except Exception as exc:
                 self.error(exc)
 
@@ -546,9 +565,12 @@ class ModalApp(QMainWindow):
                     lost = self.backend.samples_lost()
                     if lost > self.lost:
                         self.capture.cancel()
+                        if self.live_filter:
+                            self.live_filter.reset()
                         self.status.setText('Perda de amostras: batida cancelada; rearme o trigger.')
                     self.lost = lost
-                    self.live.append(times, [force, acceleration])
+                    display_values = self.live_filter.apply([force, acceleration]) if self.live_filter else [force, acceleration]
+                    self.live.append(times, display_values)
                     result = self.capture.feed(times, force, acceleration)
                     if result:
                         self.pending, _ = self.session.capture(*result)
@@ -561,6 +583,8 @@ class ModalApp(QMainWindow):
             except Exception as exc:
                 if self.capture:
                     self.capture.cancel()
+                if self.live_filter:
+                    self.live_filter.reset()
                 if isinstance(exc, OSError) and self.controller and self.controller.running and not self.busy:
                     self.work(self.controller.stop, lambda _: None)
                 # Do not repeatedly open dialogs on a broken data stream.

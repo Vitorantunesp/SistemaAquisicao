@@ -7,11 +7,16 @@ import math
 import uuid
 
 import numpy as np
+from scipy.signal import butter, sosfilt
+from ads1800_app.monitor_signal import validate_bandpass
 
 
 @dataclass
 class ModalConfig:
-    sample_rate: float = 1000
+    sample_rate: float = 2000
+    bandpass_enabled: bool = True
+    low_cut: float = 1
+    high_cut: float = 500
     duration: float = 2
     pretrigger: float = .05
     threshold: float = 10
@@ -46,6 +51,8 @@ class ModalConfig:
             raise ValueError('Parâmetros devem ser finitos.')
         if self.sample_rate <= 0 or not 16 <= self.n <= 2_000_000:
             raise ValueError('O registro deve ter entre 16 e 2 milhões de amostras.')
+        if self.bandpass_enabled:
+            validate_bandpass(self.sample_rate, self.low_cut, self.high_cut)
         if not 2 <= self.pre < self.n - 4 or self.threshold <= 0:
             raise ValueError('Use pré-trigger de pelo menos 2 amostras, menor que o registro, e trigger positivo.')
         if not 1 / self.sample_rate <= self.force_width < (self.n-self.pre) / self.sample_rate:
@@ -75,6 +82,24 @@ class ModalConfig:
         for limits in (self.force_limits, self.response_limits):
             if limits is not None and (len(limits) != 2 or not all(math.isfinite(v) for v in limits) or limits[0] >= limits[1]):
                 raise ValueError('Limites de engenharia inválidos.')
+
+    @classmethod
+    def from_dict(cls, values):
+        # Old captures predate filtering: preserve the meaning of their saved FRFs.
+        return cls(**dict({'bandpass_enabled': False}, **values))
+
+
+def processed_signals(c, force, acceleration):
+    """SI baseline removal then identical causal SOS filters, before any windows."""
+    values = np.asarray([force, acceleration], dtype=float).copy()
+    if values.shape != (2, c.n) or not np.isfinite(values).all():
+        raise ValueError('Registro incompleto ou inválido.')
+    values -= values[:, :max(1, c.pre//2)].mean(axis=1, keepdims=True)
+    if c.bandpass_enabled:
+        validate_bandpass(c.sample_rate, c.low_cut, c.high_cut)
+        sos = butter(4, [c.low_cut, c.high_cut], btype='bandpass', fs=c.sample_rate, output='sos')
+        values = sosfilt(sos, values, axis=1)
+    return values
 
 
 class ImpactCapture:
@@ -156,8 +181,9 @@ def analyze_hit(c, data):
     baseline = max(1, c.pre//2)
     f = data[:, 1] - np.mean(data[:baseline, 1])
     a = data[:, 2] - np.mean(data[:baseline, 2])
+    processed_f, processed_a = processed_signals(c, data[:, 1], data[:, 2])
     wf, wa = windows(c)
-    F, A = np.fft.rfft(f*wf), np.fft.rfft(a*wa)
+    F, A = np.fft.rfft(processed_f*wf), np.fft.rfft(processed_a*wa)
     issues = []
     peak = float(np.max(abs(f)))
     # Count separate contact regions, not local maxima inside one contact pulse.
@@ -184,7 +210,7 @@ def analyze_hit(c, data):
         end = c.pre + round(c.force_width*c.sample_rate)
         if np.max(abs(f[max(c.pre, end-2):])) > .05*max(peak, 1e-30):
             issues.append('Força fora da janela (>5% do pico)')
-    return {'F': F, 'A': A, 'force': f*wf, 'acceleration': a*wa,
+    return {'F': F, 'A': A, 'force': processed_f*wf, 'acceleration': processed_a*wa,
             'peak_N': peak, 'snr_dB': snr, 'tail_ratio': decay, 'issues': issues}
 
 
@@ -198,6 +224,8 @@ def ensemble(c, hits):
     aa = np.mean(abs(A)**2, axis=0)
     af = np.mean(A*np.conj(F), axis=0)
     valid = (ff > max(float(ff.max())*1e-10, 1e-30)) & (aa > 1e-30)
+    if c.bandpass_enabled:
+        valid &= (freq >= c.low_cut) & (freq <= c.high_cut)
     h1 = np.full(len(freq), np.nan, complex)
     h1[valid] = af[valid]/ff[valid]
     coherence = np.full(len(freq), np.nan)
@@ -223,7 +251,7 @@ class ModalSession:
         payload = json.loads((directory/'session.json').read_text(encoding='utf-8'))
         if payload.get('schema') != 1:
             raise ValueError('Versão de ensaio não suportada.')
-        config = ModalConfig(**payload['config'])
+        config = ModalConfig.from_dict(payload['config'])
         config.validate()
         records = payload['records']
         for record in records:

@@ -8,7 +8,7 @@ from ads1800_app.modal import ModalConfig, ImpactCapture, ModalSession, analyze_
 
 class ModalTests(unittest.TestCase):
     def config(self, **kwargs):
-        return ModalConfig(duration=.2, pretrigger=.02, force_width=.01,
+        return ModalConfig(sample_rate=1000, bandpass_enabled=False, duration=.2, pretrigger=.02, force_width=.01,
                            force_window='Retangular', response_window='Retangular', **kwargs)
 
     def test_trigger_boundary_pretrigger_polarity_and_single_shot(self):
@@ -61,7 +61,7 @@ class ModalTests(unittest.TestCase):
         self.assertLess(np.nanmean(ensemble(c, noisy)[2]), .05)
 
     def test_windows_and_quality(self):
-        c = ModalConfig(duration=.2, pretrigger=.02, force_width=.01, force_limits=(-50, 50))
+        c = ModalConfig(sample_rate=1000, bandpass_enabled=False, duration=.2, pretrigger=.02, force_width=.01, force_limits=(-50, 50))
         wf, wa = windows(c)
         self.assertEqual(wf[c.pre], 1)
         self.assertEqual(wf[-1], 0)

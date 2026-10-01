@@ -17,6 +17,8 @@ continuam disponíveis para os programas anteriores.
    Não há quantidade fixa de pontos. A posição XY do acelerômetro é fixa durante
    todo o ensaio. Força e aceleração são normais ao plano XY, em Z.
 4. Ajuste a taxa, o registro total (inclui o pré-trigger), o limiar em N e as janelas.
+   O passa-banda fica ativado inicialmente entre **1 e 500 Hz**, com amostragem
+   padrão de **2000 Hz**. É possível desativá-lo ou ajustar os dois cortes.
    **Atualizar desenho** confere a configuração e mostra a geometria.
 5. Clique **Iniciar novo ensaio** e escolha a pasta. Uma subpasta exclusiva recebe
    configuração, metadados dos canais, sinais e resultados.
@@ -30,8 +32,8 @@ continuam disponíveis para os programas anteriores.
    permanece na mesma posição. **Parar aquisição** cancela registros incompletos,
    preservando capturas completas para revisão.
 
-As curvas temporais mostram dados originais em SI; as FFTs usam os sinais com
-remoção de linha de base e janelamento. Enquanto armado, os gráficos temporais
+As curvas temporais mostram dados em SI com passa-banda quando ativado; as FFTs
+usam os sinais com remoção de linha de base, passa-banda e janelamento. Enquanto armado, os gráficos temporais
 mostram os últimos dois segundos ao vivo. Depois do impacto, mostram o registro
 com tempo relativo ao trigger. As FRFs e a coerência usam apenas capturas aceitas.
 
@@ -90,6 +92,41 @@ Referência para escolha das janelas: [NI — Understanding FFTs and Windowing](
 - `frf_ponto_<índice>.csv`: frequência, partes real e imaginária da H1, módulo,
   fase em graus e coerência. O índice corresponde à ordem dos pontos em `session.json`.
 - **Exportar sinais da batida selecionada**: CSV com tempo, força e aceleração.
+  Com filtro ativado, inclui as colunas originais e as colunas de força e aceleração
+  filtradas, identificadas no cabeçalho.
+
+## Filtro passa-banda
+
+A configuração contém **Ativar filtro passa-banda em todos os resultados**, corte
+inferior e corte superior em Hz. Novos ensaios usam o filtro ativado em 1–500 Hz.
+O corte superior precisa ser estritamente menor que metade da amostragem: 1000 Hz
+de amostragem não comporta esse corte; o novo padrão de amostragem é 2000 Hz.
+Não há alteração automática dos cortes quando o usuário escolhe outra taxa.
+
+O filtro é Butterworth causal, implementado em seções de segunda ordem (SOS), com
+protótipo de ordem 4 (passa-banda de 8 polos). A mesma função de transferência é
+aplicada à força e à aceleração. No registro capturado, remove-se a linha de base
+do pré-trigger, aplica-se o filtro e só então as janelas e FFTs. As FRFs H1 e a
+coerência usam esses espectros; frequências fora dos cortes são mascaradas. O
+pós-processamento modal aplica o mesmo filtro aos sinais originais antes de sua
+janela exponencial comum, e restringe o ajuste à banda configurada.
+
+Na visualização ao vivo, o filtro conserva o estado entre blocos. Para cada batida
+completa, ele é reiniciado sobre o registro com pré-trigger e linha de base removida,
+para garantir reprocessamento determinístico. Pode haver diferença de transiente
+entre a curva ao vivo e o registro final. Confira o início e o decaimento dos sinais
+filtrados e ajuste pré-trigger, duração e janela de força para incluir sua resposta.
+O filtro introduz atraso e transientes; não é um filtro de fase zero.
+
+O trigger e os indicadores de qualidade da batida usam os sinais originais, evitando
+que o filtro esconda saturação ou que seu transiente seja confundido com impacto
+duplo. Os arquivos NPZ preservam esses sinais originais e os espectros processados;
+o CSV de exportação permite comparar sinais originais e filtrados. O relatório modal
+exportado também registra a configuração do filtro.
+
+A configuração do filtro é salva com o ensaio. Arquivos antigos que não possuem
+esses campos são abertos com filtro desativado para preservar suas FRFs existentes;
+novas configurações e ensaios partem do filtro ativado por padrão.
 
 O simulador gera impactos periódicos e duas respostas modais causais, próximas
 de 35 e 90 Hz. Serve para experimentar o fluxo e verificar a apresentação; não
@@ -148,8 +185,9 @@ Com mínimo de uma batida, a ausência de coerência é avisada e o filtro não 
 àquele ponto. Em faixas muito extensas, há redução de bins para limitar o custo,
 preservando vizinhanças dos candidatos na resolução original.
 
-A mesma janela `exp(-αt)` é aplicada à força e à aceleração originais, após remover
-a média da primeira metade do pré-trigger. `α = -ln(resíduo) / duração entre primeira
+A mesma janela `exp(-αt)` é aplicada à força e à aceleração, após remover
+a média da primeira metade do pré-trigger e aplicar o passa-banda, se ativado.
+`α = -ln(resíduo) / duração entre primeira
 e última amostra`. A resposta transformada corresponde a `H(α + iω)`, onde o modelo
 é avaliado durante o ajuste. Assim, o amortecimento retornado é o parâmetro físico
 do modelo, levando em conta o decaimento exponencial introduzido. Isso evita aplicar

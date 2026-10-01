@@ -17,6 +17,8 @@ inclui geometria plana, pontos de impacto livres, acelerômetro fixo, trigger,
 janelamento, FFTs, FRF H1, coerência e revisão das batidas, com simulador próprio.
 Na terceira aba, o pós-processamento estima frequências naturais, amortecimentos
 e formas modais relativas, com animação dos pontos medidos e exportação dos resultados.
+O passa-banda modal vem ativado em 1–500 Hz, com amostragem padrão de 2000 Hz,
+e pode ser ajustado ou desativado na configuração do ensaio.
 Consulte [o guia de análise modal](ANALISE_MODAL.md) para configuração e arquivos.
 
 A interface de monitoramento da ponte foi incorporada de `MonitorPonte.zip`.

@@ -24,6 +24,12 @@ class ModalUiTests(unittest.TestCase):
 
     def test_simulated_capture_review_export_and_stop(self):
         window = ModalApp()
+        self.assertTrue(window.bandpass.isChecked())
+        self.assertEqual(window.fields['low_cut'].value(), 1)
+        self.assertEqual(window.fields['high_cut'].value(), 500)
+        window.bandpass.setChecked(False)
+        self.assertFalse(window.fields['high_cut'].isEnabled())
+        window.bandpass.setChecked(True)
         errors = []
         window.error = errors.append
         window.show()
@@ -33,6 +39,15 @@ class ModalUiTests(unittest.TestCase):
             self.assertIsNotNone(window.backend)
             window.fields['duration'].setValue(.5)
             with tempfile.TemporaryDirectory() as directory:
+                settings_path = Path(directory)/'config.json'
+                with patch('ads1800_app.ui.modal.QFileDialog.getSaveFileName', return_value=(str(settings_path), '')):
+                    window.save_config()
+                window.bandpass.setChecked(False)
+                window.fields['high_cut'].setValue(300)
+                with patch('ads1800_app.ui.modal.QFileDialog.getOpenFileName', return_value=(str(settings_path), '')):
+                    window.load_config()
+                self.assertTrue(window.bandpass.isChecked())
+                self.assertEqual(window.fields['high_cut'].value(), 500)
                 with patch('ads1800_app.ui.modal.QFileDialog.getExistingDirectory', return_value=directory):
                     window.start()
                 self.wait(lambda: not window.busy)
@@ -52,10 +67,11 @@ class ModalUiTests(unittest.TestCase):
                 csv = Path(directory)/'hit.csv'
                 with patch('ads1800_app.ui.modal.QFileDialog.getSaveFileName', return_value=(str(csv), '')):
                     window.export_hit()
-                self.assertEqual(np.loadtxt(csv, delimiter=';', skiprows=1).shape, (500, 3))
+                self.assertEqual(np.loadtxt(csv, delimiter=';', skiprows=1).shape, (window.session.config.n, 5))
                 window.stop()
                 self.wait(lambda: not window.busy)
                 self.assertFalse(window.controller.running)
+                self.assertTrue(window.session.config.bandpass_enabled)
                 saved_folder = str(window.session.directory)
                 with patch('ads1800_app.ui.modal.QFileDialog.getExistingDirectory', return_value=saved_folder):
                     window.open_session()

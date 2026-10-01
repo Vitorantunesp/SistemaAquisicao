@@ -212,8 +212,10 @@ class PostPanel(QWidget):
         self.view.config = session.config if session else None
         if session:
             nyquist = session.config.sample_rate/2
-            self.fields['fmax'].setValue(min(200, nyquist))
-            self.fields['fmin'].setValue(min(5, nyquist/10))
+            low = session.config.low_cut if session.config.bandpass_enabled else .001
+            high = session.config.high_cut if session.config.bandpass_enabled else nyquist
+            self.fields['fmax'].setValue(min(max(200, low+(high-low)/2), high))
+            self.fields['fmin'].setValue(max(low, min(5, high/10)))
         self.invalidate()
 
     def invalidate(self, *_):
@@ -322,7 +324,10 @@ class PostPanel(QWidget):
             directory = self.session.directory/f'pos_processamento_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}'
             # Include geometry so exported relative shapes remain self-contained.
             report = dict(self.result, geometry={'outline': self.session.config.outline,
-                          'points': self.session.config.points, 'accelerometer': self.session.config.accelerometer})
+                          'points': self.session.config.points, 'accelerometer': self.session.config.accelerometer},
+                          bandpass={'enabled': self.session.config.bandpass_enabled,
+                                    'low_hz': self.session.config.low_cut, 'high_hz': self.session.config.high_cut,
+                                    'method': 'Butterworth SOS causal; protótipo ordem 4; antes do janelamento'})
             export_results(report, directory)
             self.summary.setText(f'Resultados salvos em {directory}')
         except Exception as exc:

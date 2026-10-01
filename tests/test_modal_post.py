@@ -30,7 +30,7 @@ def analytic_data(alpha=0, noise=0):
 
 
 def raw_session(folder):
-    c = ModalConfig(sample_rate=2000, duration=4, pretrigger=.05, force_width=.02,
+    c = ModalConfig(sample_rate=2000, bandpass_enabled=False, duration=4, pretrigger=.05, force_width=.02,
                     response_window='Hann')
     session = ModalSession(Path(folder)/'run', c)
     f = np.fft.rfftfreq(c.n, 1/c.sample_rate)
