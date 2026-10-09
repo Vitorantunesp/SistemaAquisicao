@@ -13,6 +13,7 @@ from ads1800_app.modal_post import PostSettings, StabilitySettings, prepare_data
 from ads1800_app.modal_ema import identify_ema, reconstruct_ema
 from ads1800_app.ui.stabilization import StabilizationCanvas
 from ads1800_app.ui.plots import ChannelCanvas, envelope_indices
+from ads1800_app.ui.frf_view import FRF_VIEWS, frf_components
 
 
 class Comparison(ChannelCanvas):
@@ -229,8 +230,20 @@ class PostPanel(QWidget):
         self.point.currentIndexChanged.connect(self.show_comparison)
         comparison_row.addWidget(self.point)
         right_box.addLayout(comparison_row)
+        self.frf_view = QComboBox()
+        self.frf_view.addItems(FRF_VIEWS)
+        self.frf_view.currentIndexChanged.connect(self.show_comparison)
+        right_box.addWidget(self.frf_view)
         self.comparison = Comparison()
-        right_box.addWidget(self.comparison)
+        self.comparison_secondary = Comparison()
+        self.comparison_labels = [QLabel('Magnitude [(m/s²)/N]'), QLabel('Fase [graus]')]
+        comparison_charts = QHBoxLayout()
+        for label, canvas in zip(self.comparison_labels, (self.comparison, self.comparison_secondary)):
+            column = QVBoxLayout()
+            column.addWidget(label)
+            column.addWidget(canvas)
+            comparison_charts.addLayout(column)
+        right_box.addLayout(comparison_charts)
         self.error_label = QLabel('Módulo da acelerância [(m/s²)/N] × frequência [Hz]')
         right_box.addWidget(self.error_label)
         self.result_tabs = QTabWidget()
@@ -277,8 +290,9 @@ class PostPanel(QWidget):
         self.view.shape_imag = {}
         self.view.mode_label = 'Nenhum modo selecionado'
         self.view.update()
-        self.comparison.times = self.comparison.values = self.comparison.model = np.array([])
-        self.comparison.update()
+        for canvas in (self.comparison, self.comparison_secondary):
+            canvas.times = canvas.values = canvas.model = np.array([])
+            canvas.update()
         self.stability_canvas.set_result(None)
         self.mac_label.setText('Auto-MAC disponível após selecionar modos.')
         self.update_markers([])
@@ -289,7 +303,7 @@ class PostPanel(QWidget):
         self.export.setEnabled(False)
 
     def update_markers(self, frequencies):
-        for canvas in [self.comparison, *[self.owner.plots[key] for key in ('fft_force', 'fft_acceleration', 'frf', 'phase', 'coherence')]]:
+        for canvas in [self.comparison, self.comparison_secondary, *[self.owner.plots[key] for key in ('fft_force', 'fft_acceleration', 'frf', 'phase', 'coherence')]]:
             canvas.frequency_markers = list(frequencies)
             canvas.update()
 
@@ -396,13 +410,19 @@ class PostPanel(QWidget):
         if self.session.config.bandpass_enabled:
             maximum = min(maximum, self.session.config.high_cut)
         mask = (r['frequency'] >= r['settings']['fmin']) & (r['frequency'] <= maximum)
-        x, y, fit = r['frequency'][mask], abs(r['measured'][i, mask]), abs(r['fitted'][i, mask])
-        canvas = self.comparison
-        canvas.times, canvas.values, canvas.model = x, y, fit
-        canvas.x_range = (r['settings']['fmin'], maximum)
-        valid = np.r_[y[np.isfinite(y)], fit[np.isfinite(fit)]]
-        canvas.y_range = (0, max(float(valid.max())*1.1, 1e-12) if len(valid) else 1)
-        canvas.update()
+        x = r['frequency'][mask]
+        measured = frf_components(r['measured'][i, mask], self.frf_view.currentIndex())
+        fitted = frf_components(r['fitted'][i, mask], self.frf_view.currentIndex())
+        for canvas, title, (y, label, fixed), (fit, _, _) in zip(
+                (self.comparison, self.comparison_secondary), self.comparison_labels, measured, fitted):
+            title.setText(label)
+            canvas.times, canvas.values, canvas.model = x, y, fit
+            canvas.x_range = (r['settings']['fmin'], maximum)
+            valid = np.r_[y[np.isfinite(y)], fit[np.isfinite(fit)]]
+            low, high = (float(valid.min()), float(valid.max())) if len(valid) else (0, 1)
+            margin = max((high-low)*.08, abs(high)*.01, 1e-12)
+            canvas.y_range = fixed or (low-margin, high+margin)
+            canvas.update()
         error = r['relative_fit_error'][self.point.currentText()]
         self.error_label.setText('Acelerância [(m/s²)/N] × Hz · erro complexo: '+(f'{error:.2%}' if error is not None else 'sem reconstrução'))
 

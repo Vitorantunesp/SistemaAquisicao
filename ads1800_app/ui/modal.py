@@ -24,6 +24,7 @@ from ads1800_app.modal import ModalConfig, ImpactCapture, ModalSession, ensemble
 from ads1800_app.monitor_signal import StreamingBandpass
 from ads1800_app.ui.plots import ChannelCanvas, DisplayBuffer
 from ads1800_app.ui.modal_post import PostPanel
+from ads1800_app.ui.frf_view import FRF_VIEWS, frf_components
 
 
 class Geometry(QWidget):
@@ -202,6 +203,13 @@ class ModalApp(QMainWindow):
         self.stop_button = self.button('Parar aquisição', self.stop, row)
         layout.addLayout(row)
         self.status = QLabel('Inicie um ensaio na configuração.')
+        frf_row = QHBoxLayout()
+        frf_row.addWidget(QLabel('Visualização da FRF:'))
+        self.frf_view = QComboBox()
+        self.frf_view.addItems(FRF_VIEWS)
+        frf_row.addWidget(self.frf_view)
+        frf_row.addStretch()
+        layout.addLayout(frf_row)
         self.status.setWordWrap(True)
         self.status.setMaximumHeight(55)
         layout.addWidget(self.status)
@@ -229,6 +237,7 @@ class ModalApp(QMainWindow):
         right = QWidget()
         plots = QGridLayout(right)
         self.plots = {}
+        self.plot_labels = {}
         for index, (key, label) in enumerate([
             ('force', 'Força [N] × tempo [s]'), ('frf', 'FRF H1 — módulo [(m/s²)/N] × Hz'),
             ('acceleration', 'Aceleração [m/s²] × tempo [s]'), ('phase', 'FRF H1 — fase [graus] × Hz'),
@@ -237,7 +246,8 @@ class ModalApp(QMainWindow):
             panel = QWidget()
             box = QVBoxLayout(panel)
             box.setContentsMargins(0, 0, 0, 0)
-            box.addWidget(QLabel(label))
+            self.plot_labels[key] = QLabel(label)
+            box.addWidget(self.plot_labels[key])
             canvas = ChannelCanvas('#2563eb' if index % 2 == 0 else '#16a34a')
             canvas.x_label = 'Tempo [s]' if key in ('force', 'acceleration') else 'Frequência [Hz]'
             canvas.setMinimumSize(260, 140)
@@ -250,6 +260,12 @@ class ModalApp(QMainWindow):
         splitter.addWidget(right)
         splitter.setSizes([340, 1050])
         layout.addWidget(splitter)
+        self.frf_view.currentIndexChanged.connect(self.change_frf_view)
+
+    def change_frf_view(self, *_):
+        for key, (_, label, _) in zip(('frf', 'phase'), frf_components(np.array([], complex), self.frf_view.currentIndex())):
+            self.plot_labels[key].setText(f'FRF H1 — {label} × Hz')
+        self.results()
 
     def error(self, exc):
         self.status.setText(str(exc))
@@ -496,8 +512,9 @@ class ModalApp(QMainWindow):
         point = self.point.currentText()
         hits = self.session.hits(point)
         f, h1, coh = ensemble(self.session.config, hits)
-        self.plot('frf', f, abs(h1))
-        self.plot('phase', f, np.angle(h1, deg=True), (-180, 180))
+        for key, (values, label, fixed) in zip(('frf', 'phase'), frf_components(h1, self.frf_view.currentIndex())):
+            self.plot_labels[key].setText(f'FRF H1 — {label} × Hz')
+            self.plot(key, f, values, fixed)
         self.plot('coherence', f, coh, (0, 1))
         self.progress.setText(f'{point}: {len(hits)} / {self.session.config.averages} batidas aceitas\n'
                               + ('Coerência: precisa de ≥2 batidas.' if len(hits) < 2 else 'Médias espectrais das batidas aceitas.')

@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+import numpy as np
 from unittest.mock import patch
 from PyQt6.QtWidgets import QApplication
 from ads1800_app.ui.modal import ModalApp
@@ -47,6 +48,30 @@ class PostUiTests(unittest.TestCase):
                 self.assertEqual(len(window.plots['frf'].frequency_markers), 2)
                 self.assertEqual(len(post.comparison.frequency_markers), 2)
                 self.assertTrue(post.export.isEnabled())
+                original_result = post.result
+                for mode in range(3):
+                    post.frf_view.setCurrentIndex(mode)
+                    window.frf_view.setCurrentIndex(mode)
+                    frequency = post.result['frequency']
+                    visible = (frequency >= 20) & (frequency <= 115)
+                    measured = post.result['measured'][0, visible]
+                    fitted = post.result['fitted'][0, visible]
+                    np.testing.assert_allclose(post.comparison.values, abs(measured) if mode == 0 else measured.real)
+                    np.testing.assert_allclose(post.comparison_secondary.values,
+                                               measured.imag if mode == 2 else np.angle(measured, deg=True))
+                    np.testing.assert_allclose(post.comparison_secondary.model,
+                                               fitted.imag if mode == 2 else np.angle(fitted, deg=True))
+                    from ads1800_app.modal import ensemble
+                    _, h, _ = ensemble(session.config, session.hits(window.point.currentText()))
+                    np.testing.assert_allclose(window.plots['frf'].values, abs(h) if mode == 0 else h.real)
+                    np.testing.assert_allclose(window.plots['phase'].values,
+                                               h.imag if mode == 2 else np.angle(h, deg=True))
+                    if mode < 2:
+                        self.assertEqual(post.comparison_secondary.y_range, (-180, 180))
+                    self.assertIs(post.result, original_result)
+                    self.assertEqual(len(post.comparison_secondary.frequency_markers), 2)
+                post.frf_view.setCurrentIndex(0)
+                window.frf_view.setCurrentIndex(0)
                 post.select_mode(1)
                 self.assertLess(post.view.shape['P1'], 0)
                 self.assertGreater(post.view.shape['P2'], 0)

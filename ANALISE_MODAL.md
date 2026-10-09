@@ -37,6 +37,12 @@ usam os sinais com remoção de linha de base, passa-banda e janelamento. Enquan
 mostram os últimos dois segundos ao vivo. Depois do impacto, mostram o registro
 com tempo relativo ao trigger. As FRFs e a coerência usam apenas capturas aceitas.
 
+O seletor de visualização da FRF permite **Magnitude + Fase**, **Parte real + Fase**
+ou **Parte real + Parte imaginária**, tanto na aquisição quanto no pós-processamento.
+A fase é apresentada em graus, de −180° a +180°; as demais componentes usam
+`(m/s²)/N`. No pós-processamento, os dois gráficos comparam a FRF medida e a
+ajustada. A troca não recalcula nem invalida os resultados modais.
+
 **Abrir ensaio salvo** reabre a subpasta que contém `session.json`, inclusive sem
 conexão ao hardware. Clique em uma captura para rever os sinais e alterar sua
 aceitação. A mudança recalcula as médias e atualiza os arquivos. Para um novo
