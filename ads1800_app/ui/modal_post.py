@@ -7,9 +7,11 @@ from PyQt6.QtCore import QPointF, Qt, QTimer, QRectF
 from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QDoubleSpinBox, QSpinBox, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
-    QComboBox, QSplitter, QSlider)
+    QComboBox, QSplitter, QSlider, QTabWidget)
 
-from ads1800_app.modal_post import PostSettings, prepare_data, fit_modes, export_results
+from ads1800_app.modal_post import PostSettings, StabilitySettings, prepare_data, fit_modes, export_results
+from ads1800_app.modal_ema import identify_ema, reconstruct_ema
+from ads1800_app.ui.stabilization import StabilizationCanvas
 from ads1800_app.ui.plots import ChannelCanvas, envelope_indices
 
 
@@ -40,6 +42,7 @@ class Comparison(ChannelCanvas):
             points.append(QPointF(left+(self.times[i]-x0)/(x1-x0)*(right-left),
                                   bottom-(self.model[i]-y0)/(y1-y0)*(bottom-top)))
         p.drawPolyline(points)
+        self.paint_frequency_markers(p)
 
 
 class ModeView(QWidget):
@@ -48,6 +51,7 @@ class ModeView(QWidget):
         self.setMinimumSize(400, 300)
         self.config = None
         self.shape = {}
+        self.shape_imag = {}
         self.mode_label = 'Nenhum modo selecionado'
         self.phase = 0
         self.amplitude = .25
@@ -87,7 +91,7 @@ class ModeView(QWidget):
         for name, x, y in c.points:
             reference = pos([x, y])
             measured = name in self.shape
-            displacement = self.shape.get(name, 0)*span*self.amplitude*np.cos(self.phase)
+            displacement = (self.shape.get(name, 0)*np.cos(self.phase)-self.shape_imag.get(name, 0)*np.sin(self.phase))*span*self.amplitude
             moving = pos([x, y], displacement)
             p.setPen(QPen(QColor('#64748b'), 1, Qt.PenStyle.DotLine))
             p.drawLine(reference, moving)
@@ -146,6 +150,32 @@ class PostPanel(QWidget):
         self.seeds.textChanged.connect(self.invalidate)
         grid.addWidget(QLabel('Candidatos manuais (opcional)'), 4, 2)
         grid.addWidget(self.seeds, 5, 2)
+        self.engine = QComboBox()
+        self.engine.addItems(['sdypy-EMA · LSCF + LSFD', 'Ajuste de modos reais (anterior)'])
+        self.engine.currentIndexChanged.connect(self.invalidate)
+        grid.addWidget(QLabel('Identificação modal'), 6, 0)
+        grid.addWidget(self.engine, 7, 0)
+        self.polynomial_order = QSpinBox()
+        self.polynomial_order.setRange(3, 60)
+        self.polynomial_order.setValue(20)
+        self.polynomial_order.valueChanged.connect(self.invalidate)
+        grid.addWidget(QLabel('Limite polinomial LSCF (ordem dinâmica = 2×)'), 6, 1)
+        grid.addWidget(self.polynomial_order, 7, 1)
+        self.stability_fields = {}
+        tolerances = QHBoxLayout()
+        for name, title, default, low, high in [('frequency_tolerance', 'Δf %', 1, .01, 50),
+                                               ('damping_tolerance', 'Δζ %', 5, .01, 100),
+                                               ('min_mac', 'MAC', .95, 0, 1)]:
+            box = QDoubleSpinBox()
+            box.setDecimals(2)
+            box.setRange(low, high)
+            box.setValue(default)
+            box.valueChanged.connect(self.invalidate)
+            self.stability_fields[name] = box
+            tolerances.addWidget(QLabel(title))
+            tolerances.addWidget(box)
+        grid.addWidget(QLabel('Tolerâncias entre ordens adjacentes'), 6, 2)
+        grid.addLayout(tolerances, 7, 2)
         layout.addWidget(self.controls)
         row = QHBoxLayout()
         self.calculate = QPushButton('Calcular frequências, amortecimentos e modos')
@@ -168,8 +198,8 @@ class PostPanel(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.currentCellChanged.connect(lambda row, col, *_: self.select_mode(row, col))
         left_box.addWidget(self.table)
-        self.components = QTableWidget(0, 2)
-        self.components.setHorizontalHeaderLabels(['Ponto', 'Z relativo'])
+        self.components = QTableWidget(0, 3)
+        self.components.setHorizontalHeaderLabels(['Ponto', 'Z real', 'Z imaginário'])
         self.components.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         left_box.addWidget(self.components)
         self.notes = QLabel('Formas normalizadas: maior componente = +1.\n'
@@ -203,7 +233,28 @@ class PostPanel(QWidget):
         right_box.addWidget(self.comparison)
         self.error_label = QLabel('Módulo da acelerância [(m/s²)/N] × frequência [Hz]')
         right_box.addWidget(self.error_label)
-        splitter.addWidget(right)
+        self.result_tabs = QTabWidget()
+        self.result_tabs.addTab(right, 'Formas e FRF')
+        stability_page = QWidget()
+        stability_box = QVBoxLayout(stability_page)
+        self.stability_canvas = StabilizationCanvas()
+        stability_box.addWidget(self.stability_canvas, 1)
+        legend = QLabel('Cinza: novo · azul: frequência · laranja: frequência + amortecimento · verde: + MAC\n'
+                        'Borda vermelha: selecionado. Clique para marcar uma ocorrência de cada modo e aplique.\n'
+                        'Linhas roxas tracejadas: frequências do ajuste selecionado. Estabilidade não certifica um modo físico.')
+        legend.setWordWrap(True)
+        stability_box.addWidget(legend)
+        self.selection_label = QLabel('Sem polos selecionados.')
+        stability_box.addWidget(self.selection_label)
+        self.apply_poles = QPushButton('Aplicar polos selecionados (LSFD)')
+        self.apply_poles.clicked.connect(self.reconstruct)
+        self.stability_canvas.selection_changed.connect(self.selection_updated)
+        stability_box.addWidget(self.apply_poles)
+        self.mac_label = QLabel('Auto-MAC disponível após selecionar modos.')
+        self.mac_label.setWordWrap(True)
+        stability_box.addWidget(self.mac_label)
+        self.result_tabs.addTab(stability_page, 'Diagrama de estabilização')
+        splitter.addWidget(self.result_tabs)
         splitter.setSizes([460, 800])
         layout.addWidget(splitter, 1)
 
@@ -223,15 +274,34 @@ class PostPanel(QWidget):
         self.table.setRowCount(0)
         self.components.setRowCount(0)
         self.view.shape = {}
+        self.view.shape_imag = {}
         self.view.mode_label = 'Nenhum modo selecionado'
         self.view.update()
         self.comparison.times = self.comparison.values = self.comparison.model = np.array([])
         self.comparison.update()
+        self.stability_canvas.set_result(None)
+        self.mac_label.setText('Auto-MAC disponível após selecionar modos.')
+        self.update_markers([])
         self.summary.setText('Resultados não calculados ou desatualizados. Calcule com as batidas atualmente aceitas.')
-        self.notes.setText('Formas relativas para estrutura linear e recíproca com modos reais.\n'
+        self.notes.setText('Formas relativas para estrutura linear e recíproca.\n'
                            'Modos com nó na referência fixa podem não ser observados.')
         self.error_label.setText('Módulo da acelerância [(m/s²)/N] × frequência [Hz]')
         self.export.setEnabled(False)
+
+    def update_markers(self, frequencies):
+        for canvas in [self.comparison, *[self.owner.plots[key] for key in ('fft_force', 'fft_acceleration', 'frf', 'phase', 'coherence')]]:
+            canvas.frequency_markers = list(frequencies)
+            canvas.update()
+
+    def selection_updated(self):
+        self.selection_label.setText(f'{len(self.stability_canvas.selected)} polos marcados; aplique para atualizar FRF, formas e linhas.')
+
+    def reconstruct(self):
+        if not self.result or '_ema_context' not in self.result or self.owner.busy:
+            return
+        context = self.result['_ema_context']
+        selected = [list(key) for key in sorted(self.stability_canvas.selected)]
+        self.owner.work(lambda: reconstruct_ema(context, selected), self.display)
 
     def refresh(self, running, busy):
         if self.computing and not busy:
@@ -242,6 +312,8 @@ class PostPanel(QWidget):
         self.controls.setEnabled(not busy)
         self.calculate.setEnabled(allowed)
         self.export.setEnabled(allowed and self.result is not None)
+        self.apply_poles.setEnabled(allowed and self.result is not None and '_ema_context' in self.result)
+        self.stability_canvas.setEnabled(not busy)
 
     def compute(self):
         if self.session is None or self.owner.busy or self.owner.controller and self.owner.controller.running:
@@ -257,11 +329,20 @@ class PostPanel(QWidget):
         self.summary.setText('Recalculando FRFs aceitas e ajustando os modos…')
         self.computing = True
         session = self.session
-        self.owner.work(lambda: fit_modes(prepare_data(session, settings), settings, seeds), self.display)
+        engine = self.engine.currentIndex()
+        order = self.polynomial_order.value()
+        stability = StabilitySettings(frequency_tolerance=self.stability_fields['frequency_tolerance'].value()/100,
+                                      damping_tolerance=self.stability_fields['damping_tolerance'].value()/100,
+                                      min_mac=self.stability_fields['min_mac'].value())
+        self.owner.work(lambda: identify_ema(prepare_data(session, settings), settings, seeds, order, stability)
+                        if engine == 0 else fit_modes(prepare_data(session, settings), settings, seeds), self.display)
 
     def display(self, result):
         self.computing = False
         self.result = result
+        self.update_markers([m['frequency_hz'] for m in result['modes']])
+        self.stability_canvas.set_result(result)
+        self.selection_updated()
         self.table.setRowCount(len(result['modes']))
         for row, mode in enumerate(result['modes']):
             for col, value in enumerate([str(row+1), f"{mode['frequency_hz']:.4f}", f"{mode['damping_ratio']*100:.4f}",
@@ -269,15 +350,26 @@ class PostPanel(QWidget):
                 self.table.setItem(row, col, QTableWidgetItem(value))
         self.point.clear()
         self.point.addItems(result['point_ids'])
-        error = max(result['relative_fit_error'].values())
+        error = max([v for v in result['relative_fit_error'].values() if v is not None], default=0)
         self.summary.setText(f"{len(result['modes'])} modos estimados · erro máximo da FRF: {error:.1%} · "
-                             f"resolução: {result['frequency_resolution_hz']:.4g} Hz · exponencial considerada no ajuste.")
+                               f"resolução: {result['frequency_resolution_hz']:.4g} Hz · exponencial considerada no ajuste.")
+        if not result['modes']:
+            self.summary.setText('Nenhum polo selecionado automaticamente. Revise o diagrama e selecione os modos para reconstruir a FRF.')
         warnings = result['warnings']
         self.notes.setText('Formas relativas, sem normalização por massa. Pontos sem estimativa ficam cinza.\n'
-                           'Hipóteses: linearidade, reciprocidade e modos reais. Modos nodais na referência podem ser invisíveis.\n'+
+                           'Formas complexas no sdypy-EMA. Modos nodais na referência podem ser invisíveis.\n'+
                            '\n'.join(warnings[:8])+ ('\nMais alertas no relatório exportado.' if len(warnings) > 8 else ''))
-        self.table.selectRow(0)
-        self.select_mode(0)
+        if result['modes']:
+            self.table.selectRow(0)
+            self.select_mode(0)
+        else:
+            self.view.shape = self.view.shape_imag = {}
+            self.view.mode_label = 'Selecione polos no diagrama'
+            self.components.setRowCount(0)
+            self.result_tabs.setCurrentIndex(1)
+        if 'auto_mac' in result:
+            matrix = np.asarray(result['auto_mac'])
+            self.mac_label.setText('Auto-MAC (linhas/colunas = modos):\n'+'\n'.join('  '.join(f'{v:.3f}' for v in row) for row in matrix))
         self.show_comparison()
 
     def select_mode(self, row, column=0):
@@ -286,12 +378,14 @@ class PostPanel(QWidget):
         mode = self.result['modes'][row]
         self.view.mode_label = f"Modo {row+1} · {mode['frequency_hz']:.3f} Hz · ζ = {100*mode['damping_ratio']:.3f}%"
         self.view.shape = mode['shape']
+        self.view.shape_imag = mode.get('shape_imag', {})
         self.view.phase = 0
         self.view.update()
         self.components.setRowCount(len(self.session.config.points))
         for i, (name, *_) in enumerate(self.session.config.points):
             self.components.setItem(i, 0, QTableWidgetItem(name))
             self.components.setItem(i, 1, QTableWidgetItem(f"{mode['shape'][name]:+.5f}" if name in mode['shape'] else 'Sem estimativa'))
+            self.components.setItem(i, 2, QTableWidgetItem(f"{mode.get('shape_imag', {}).get(name, 0):+.5f}" if name in mode['shape'] else 'Sem estimativa'))
 
     def show_comparison(self, *_):
         if self.result is None or self.point.currentIndex() < 0:
@@ -307,10 +401,10 @@ class PostPanel(QWidget):
         canvas.times, canvas.values, canvas.model = x, y, fit
         canvas.x_range = (r['settings']['fmin'], maximum)
         valid = np.r_[y[np.isfinite(y)], fit[np.isfinite(fit)]]
-        canvas.y_range = (0, max(float(valid.max())*1.1, 1e-12))
+        canvas.y_range = (0, max(float(valid.max())*1.1, 1e-12) if len(valid) else 1)
         canvas.update()
         error = r['relative_fit_error'][self.point.currentText()]
-        self.error_label.setText(f'Acelerância [(m/s²)/N] × Hz · erro relativo complexo em bins válidos: {error:.2%}')
+        self.error_label.setText('Acelerância [(m/s²)/N] × Hz · erro complexo: '+(f'{error:.2%}' if error is not None else 'sem reconstrução'))
 
     def set_amplitude(self, value):
         self.view.amplitude = value/100

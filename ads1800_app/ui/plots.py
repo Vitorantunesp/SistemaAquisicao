@@ -69,6 +69,7 @@ class ChannelCanvas(QWidget):
         self.x_range = (0, 10)
         self.y_range = (-1, 1)
         self.x_label = 'Tempo [s]'
+        self.frequency_markers = []
         self.setMouseTracking(True)
 
     def plot_rect(self):
@@ -87,6 +88,32 @@ class ChannelCanvas(QWidget):
         else:
             QToolTip.hideText()
         super().mouseMoveEvent(event)
+
+    def paint_frequency_markers(self, painter):
+        rect = self.plot_rect()
+        x0, x1 = self.x_range
+        if self.x_label != 'Frequência [Hz]' or x1 <= x0:
+            return
+        painter.save()
+        painter.setClipRect(rect)
+        painter.setPen(QPen(QColor('#9333ea'), 1, Qt.PenStyle.DashLine))
+        previous_right = [-float('inf')]*2
+        for frequency in sorted(self.frequency_markers):
+            if not x0 <= frequency <= x1:
+                continue
+            x = rect.left()+(frequency-x0)/(x1-x0)*rect.width()
+            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+            label = f'{frequency:.3g} Hz'
+            width = self.fontMetrics().horizontalAdvance(label)+8
+            left = max(rect.left(), min(x+3, rect.right()-width))
+            for lane in range(2):
+                if left > previous_right[lane]+4:
+                    box = QRectF(left, rect.top()+lane*(self.fontMetrics().height()+4), width, self.fontMetrics().height()+4)
+                    painter.fillRect(box, QColor(255, 255, 255, 220))
+                    painter.drawText(box, Qt.AlignmentFlag.AlignCenter, label)
+                    previous_right[lane] = left+width
+                    break
+        painter.restore()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -131,6 +158,7 @@ class ChannelCanvas(QWidget):
             points.append(QPointF(left + (self.times[i] - x0) / (x1 - x0) * rect.width(),
                                   bottom - (self.values[i] - y0) / (y1 - y0) * rect.height()))
         painter.drawPolyline(points)
+        self.paint_frequency_markers(painter)
 
 
 class ChannelPlot(QWidget):

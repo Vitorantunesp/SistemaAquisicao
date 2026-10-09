@@ -53,8 +53,9 @@ salvas separadamente e carregadas após conectar, para conferir canais e taxa.
 | Aceleração | Exponencial (padrão) | Valor 1 até o trigger, decaindo até o resíduo final escolhido; 0,01 corresponde a 1%. |
 
 A janela de força deve conter todo o contato. A exponencial reduz vazamento, mas
-introduz amortecimento artificial e pode enviesar a FRF. Não há correção automática
-de amortecimento nesta versão. Para resultados quantitativos, prefira registrar
+introduz amortecimento artificial e pode enviesar a FRF. A FRF de aquisição não é
+corrigida; o pós-processamento usa uma exponencial comum com correção própria,
+descrita abaixo. Para resultados quantitativos, prefira registrar
 todo o decaimento e conferir o efeito das janelas.
 
 Referência para escolha das janelas: [NI — Understanding FFTs and Windowing](https://www.ni.com/en/shop/data-acquisition/measurement-fundamentals/analog-fundamentals/understanding-ffts-and-windowing.html).
@@ -168,7 +169,42 @@ Mudar configurações ou a aceitação de uma captura invalida o resultado exibi
 Os relatórios já exportados são snapshots das capturas listadas no próprio relatório.
 Não é necessário conectar ao ADS para pós-processar um ensaio salvo.
 
-### Método e efeito da janela
+### sdypy-EMA: identificação e diagrama de estabilização
+
+O motor padrão é **sdypy-EMA 0.31.0**, sucessor do pyEMA, instalado por
+`instalar.bat`. Usa LSCF para identificar polos em várias ordens e LSFD para
+obter constantes modais complexas e reconstruir as FRFs. A ordem polinomial
+máxima padrão é 20, correspondente à ordem dinâmica máxima 40.
+
+Na aba **Diagrama de estabilização**, as cores distinguem polos novos,
+estabilidade de frequência, frequência + amortecimento e também forma modal
+(MAC). As tolerâncias iniciais são 1%, 5% e MAC mínimo 0,95, ajustáveis.
+O MAC entre ordens exige pelo menos dois pontos comuns. Estabilidade numérica
+não certifica um modo físico. A seleção automática procura polos repetidos
+próximos dos picos; quando não há candidatos, o diagrama fica disponível para
+seleção manual. Clique em uma ocorrência de cada modo e em **Aplicar polos
+selecionados (LSFD)** para recalcular. Evite selecionar várias ordens do mesmo modo.
+
+As frequências selecionadas aparecem como linhas tracejadas no diagrama, na
+comparação de FRFs e nos gráficos espectrais da aquisição. O Auto-MAC compara
+as formas selecionadas; com um único ponto não permite distinguir formas.
+A animação preserva a fase relativa das componentes complexas. O relatório inclui
+partes real e imaginária das formas, constantes modais, formas reais equivalentes,
+Auto-MAC e `estabilizacao.csv`, além dos arquivos descritos acima.
+
+A acelerância com janela comum é convertida em receptância dividindo por
+`(α + iω)²`. Os polos identificados são corrigidos somando `α` à parte real;
+a reconstrução é reconvertida para acelerância. Essa correção não elimina
+truncamento, ruído ou erros de modelo. A coerência determina a elegibilidade
+dos pontos e polos e os bins usados no erro; o LSCF usa uma grade uniforme,
+sem ponderação por coerência. Apenas falhas espectrais de até dois bins e
+no máximo 5% da faixa são interpoladas, com aviso; lacunas maiores excluem o ponto.
+
+Referências: [projeto sdypy-EMA](https://github.com/sdypy/sdypy-EMA),
+[documentação da biblioteca](https://sdypy-ema.readthedocs.io/en/latest/code_documentation.html).
+A dependência é distribuída sob licença MIT.
+
+### Motor alternativo: ajuste de modos reais e efeito da janela
 
 O modelo é uma soma de modos reais de acelerância com frequências e amortecimentos
 comuns a todas as FRFs. Os coeficientes modais reais são ajustados separadamente
@@ -203,8 +239,9 @@ Referências: [B&K — Structural Testing, Part 2](https://www.bksv.com/doc/br05
 Para uma estrutura linear, recíproca e com modos reais, o coeficiente modal da FRF
 de cada ponto é proporcional ao produto da componente naquele ponto pela componente
 na referência fixa. Isso permite recuperar formas relativas por roving hammer.
-Não há normalização por massa, identificação de modos complexos, diagrama de
-estabilização nem intervalos estatísticos de confiança nesta implementação.
+Não há normalização por massa nem intervalos estatísticos de confiança.
+O motor sdypy-EMA permite formas complexas e diagrama de estabilização;
+o motor alternativo mantém a hipótese de modos reais.
 
 A animação representa apenas os graus de liberdade Z nos pontos medidos, em
 perspectiva do plano XY. Não interpola uma superfície entre pontos nem atribui
@@ -219,3 +256,23 @@ manuais e compare o ajuste das FRFs. O ajuste atual restringe ζ entre 0,001% e 
 São sinalizados amortecimento no limite, largura modal menor que dois bins,
 frequência no limite de um candidato, mau condicionamento e erro de ajuste acima
 de 20%. Os parâmetros continuam sendo estimativas que precisam de avaliação.
+
+## Importação de ensaios CSV históricos
+
+Na configuração, defina a geometria e os pontos e use **Importar CSV**.
+São aceitos os cabeçalhos do sistema ADS antigo e do programa atual, com
+tempo, martelo e acelerômetro. Unidades lbf e g são convertidas para N e m/s²;
+unidades desconhecidas e descontinuidades temporais são rejeitadas.
+
+Escolha explicitamente início/fim, ponto de impacto, trigger, duração,
+pré-trigger e filtro. Confirme que o intervalo corresponde à mesma estrutura
+e ponto. Cada importação cria um ensaio separado para o intervalo escolhido.
+Não há agrupamento automático de dez batidas nem inferência de coordenadas.
+Batidas usadas para demarcar séries devem ficar fora do intervalo selecionado.
+
+Todas as capturas entram como **pendentes**: revise os sinais e alertas antes
+de aceitar ou rejeitar cada uma. Contatos adicionais dentro de um registro
+permanecem no sinal para a avaliação de impacto duplo. A origem, as conversões
+e o intervalo ficam registrados; o CSV original permanece intacto.
+Para arquivos amostrados a 1000 Hz, o corte superior sugerido é 450 Hz,
+pois o corte precisa ficar abaixo de Nyquist (500 Hz).

@@ -182,6 +182,7 @@ class ModalApp(QMainWindow):
         self.button('Salvar configuração…', self.save_config, row)
         self.button('Carregar configuração…', self.load_config, row)
         self.open_button = self.button('Abrir ensaio salvo…', self.open_session, row)
+        self.import_button = self.button('Importar trecho CSV…', self.import_csv, row)
         layout.addLayout(row)
         self.start_button = self.button('Iniciar novo ensaio…', self.start, layout)
 
@@ -370,23 +371,31 @@ class ModalApp(QMainWindow):
             return
         try:
             session = ModalSession.load(directory)
-            self.capture = None
-            self.pending = None
-            self.session = session
-            self.post.set_session(session)
-            self.point.clear()
-            self.point.addItems([p[0] for p in session.config.points])
-            self.geometry.config = session.config
-            self.geometry.update()
-            self.folder.setText(str(session.directory))
-            self.update_history()
-            self.results()
-            if session.records:
-                self.show_hit(session.records[-1])
-            self.tabs.setCurrentIndex(1)
-            self.status.setText('Ensaio salvo aberto. Clique nas capturas para revisar; decisões atualizam as médias e os arquivos.')
+            self.adopt_session(session)
         except Exception as exc:
             self.error(exc)
+        self.refresh()
+
+    def import_csv(self):
+        from ads1800_app.ui.modal_import import import_csv
+        import_csv(self)
+
+    def adopt_session(self, session):
+        self.capture = None
+        self.pending = None
+        self.session = session
+        self.post.set_session(session)
+        self.point.clear()
+        self.point.addItems([p[0] for p in session.config.points])
+        self.geometry.config = session.config
+        self.geometry.update()
+        self.folder.setText(str(session.directory))
+        self.update_history()
+        self.results()
+        if session.records:
+            self.show_hit(session.records[-1])
+        self.tabs.setCurrentIndex(1)
+        self.status.setText('Ensaio aberto. Clique nas capturas para revisar; decisões atualizam as médias e os arquivos.')
         self.refresh()
 
     def start(self):
@@ -613,6 +622,7 @@ class ModalApp(QMainWindow):
         self.connect_button.setText('Desconectar' if self.backend else 'Conectar')
         self.start_button.setEnabled(bool(self.backend) and not running and not self.busy and self.pending is None)
         self.open_button.setEnabled(not running and not self.busy and self.pending is None)
+        self.import_button.setEnabled(not running and not self.busy and self.pending is None)
         self.arm_button.setEnabled(running and not armed and self.pending is None and not self.busy)
         self.cancel_button.setEnabled(armed and not self.busy)
         self.stop_button.setEnabled(running and not self.busy)

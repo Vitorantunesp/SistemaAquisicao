@@ -182,6 +182,15 @@ As dimensões manuais são mantidas enquanto os dados chegam. Redimensionar a
 janela muda apenas o espaço ocupado pelo gráfico, sem alterar a janela de
 tempo, a escala vertical ou a frequência de aquisição.
 
+### Identificação modal com sdypy-EMA
+
+O programa `iniciar_modal.bat` inclui identificação LSCF/LSFD com **sdypy-EMA
+0.31.0**, diagrama de estabilização interativo, frequências e amortecimentos,
+formas complexas animadas, Auto-MAC e reconstrução das FRFs. Execute
+`instalar.bat` para atualizar as dependências. A importação de CSV permite
+selecionar um intervalo e ponto explicitamente e revisar cada impacto.
+Consulte [ANALISE_MODAL.md](ANALISE_MODAL.md) para o fluxo e as limitações.
+
 ### Leitura numérica em tempo real
 
 Acima de cada gráfico aparece o valor da **última amostra recebida**, com

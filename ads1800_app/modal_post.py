@@ -4,13 +4,13 @@ H(s) = sum(r_j*s²/(s²+2*zeta_j*wn_j*s+wn_j²)) + c0 + c2*(s/2pi)².
 The same exponential applied to both signals evaluates H at s=alpha+i*w;
 fitting there estimates physical rather than window-broadened damping.
 """
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import csv
 import json
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import least_squares
+from scipy.optimize import least_squares, linear_sum_assignment
 from scipy.signal import find_peaks
 
 from ads1800_app.modal import ensemble, processed_signals
@@ -115,12 +115,17 @@ def suggest_modes(data, settings):
     """Peaks are candidates only, never asserted to be structural modes."""
     curve = indicator(data, settings)
     db = 20*np.log10(np.maximum(curve, 1e-12))
-    peaks, props = find_peaks(np.where(np.isfinite(db), db, -240), prominence=settings.prominence_db, distance=2)
-    # A hole in the coherence mask must not create a peak at the edge of a gap.
-    peaks_ok = [i for i, p in enumerate(peaks) if 0 < p < len(db)-1 and
-                np.isfinite(db[p-1:p+2]).all() and settings.fmin < data.frequency[p] < settings.fmax]
-    strongest = sorted(peaks_ok, key=lambda i: props['prominences'][i], reverse=True)[:settings.max_modes]
-    return sorted(float(data.frequency[peaks[i]]) for i in strongest)
+    # Measure prominence within finite runs: masked bands must not become deep
+    # artificial valleys that inflate the prominence of a boundary peak.
+    edges = np.diff(np.r_[False, np.isfinite(db), False].astype(int))
+    candidates = []
+    for start, stop in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+        peaks, props = find_peaks(db[start:stop], prominence=settings.prominence_db, distance=2)
+        candidates.extend((float(prominence), int(start+p))
+                          for p, prominence in zip(peaks, props['prominences'])
+                          if settings.fmin < data.frequency[start+p] < settings.fmax)
+    strongest = sorted(candidates, reverse=True)[:settings.max_modes]
+    return sorted(float(data.frequency[p]) for _, p in strongest)
 
 
 def modal_basis(frequency, frequencies, damping, alpha=0):
@@ -230,7 +235,7 @@ def export_results(result, directory):
     """Export to a new directory selected by the caller; no raw measurements changed."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
-    report = {k: v for k, v in result.items() if k not in ('frequency', 'measured', 'fitted', 'coherence')}
+    report = {k: v for k, v in result.items() if not k.startswith('_') and k not in ('frequency', 'measured', 'fitted', 'coherence')}
     (directory/'modos.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     with (directory/'modos.csv').open('w', newline='', encoding='utf-8-sig') as stream:
         writer = csv.writer(stream, delimiter=';')
@@ -239,9 +244,122 @@ def export_results(result, directory):
             writer.writerow([i, mode['frequency_hz'], 100*mode['damping_ratio'], mode['damped_frequency_hz'], ' | '.join(mode['warnings'])])
     with (directory/'formas_modais.csv').open('w', newline='', encoding='utf-8-sig') as stream:
         writer = csv.writer(stream, delimiter=';')
-        writer.writerow(['ponto']+[f'modo_{i+1}_Z_relativo' for i in range(len(result['modes']))])
+        writer.writerow(['ponto']+[f'modo_{i+1}_Z_{part}' for i in range(len(result['modes'])) for part in ('real', 'imag')])
         for point in result['point_ids']:
-            writer.writerow([point]+[m['shape'][point] for m in result['modes']])
+            writer.writerow([point]+[v for m in result['modes'] for v in (m['shape'][point], m.get('shape_imag', {}).get(point, 0))])
     np.savez_compressed(directory/'frfs_ajustadas.npz', frequency_Hz=result['frequency'],
                         measured=result['measured'], fitted=result['fitted'], coherence=result['coherence'],
                         point_ids=np.asarray(result['point_ids']))
+    if 'stabilization' in result:
+        with (directory/'estabilizacao.csv').open('w', newline='', encoding='utf-8-sig') as stream:
+            writer = csv.writer(stream, delimiter=';')
+            writer.writerow(['ordem_dinamica', 'modo', 'frequencia_Hz', 'amortecimento_percentual',
+                             'classe', 'variacao_f_relativa', 'variacao_zeta_relativa', 'MAC', 'modo_anterior'])
+            for row in result['stabilization']['orders']:
+                for index, mode in enumerate(row['modes'], 1):
+                    writer.writerow([row['order'], index, mode['frequency_hz'], mode['damping_ratio']*100,
+                                     mode['stability'], mode['frequency_change'], mode['damping_change'],
+                                     mode['mac'], mode['previous_mode']])
+
+
+@dataclass
+class StabilitySettings:
+    max_modes: int = 6
+    frequency_tolerance: float = .01
+    damping_tolerance: float = .05
+    min_mac: float = .95
+
+    def validate(self):
+        if not isinstance(self.max_modes, int) or not 2 <= self.max_modes <= 12:
+            raise ValueError('A estabilização deve usar entre 2 e 12 modos (ordens 4 a 24).')
+        if not np.isfinite([self.frequency_tolerance, self.damping_tolerance, self.min_mac]).all() or not (
+                0 < self.frequency_tolerance <= .5 and 0 < self.damping_tolerance <= 1 and 0 <= self.min_mac <= 1):
+            raise ValueError('Tolerâncias de estabilização inválidas.')
+
+
+def shape_mac(first, second):
+    """MAC is scale/sign invariant; one scalar reference cannot validate a shape."""
+    common = sorted(set(first) & set(second))
+    if len(common) < 2:
+        return None
+    a = np.asarray([first[k] for k in common], complex)
+    b = np.asarray([second[k] for k in common], complex)
+    denominator = float(np.vdot(a, a).real*np.vdot(b, b).real)
+    if not np.isfinite(denominator) or denominator <= 1e-30:
+        return None
+    return float(np.clip(abs(np.vdot(a, b))**2/denominator, 0, 1))
+
+
+def classify_stability(current, previous, settings):
+    """One-to-one frequency matching against the immediately preceding order."""
+    modes = [dict(mode, stability='novo', frequency_change=None, damping_change=None,
+                  mac=None, previous_mode=None) for mode in current]
+    if not current or not previous:
+        return modes
+    changes = np.array([[abs(m['frequency_hz']-p['frequency_hz'])/p['frequency_hz']
+                         for p in previous] for m in current])
+    rows, cols = linear_sum_assignment(np.where(changes <= settings.frequency_tolerance, changes, 1e6))
+    for row, col in zip(rows, cols):
+        if changes[row, col] > settings.frequency_tolerance:
+            continue
+        mode, old = modes[row], previous[col]
+        delta = abs(mode['damping_ratio']-old['damping_ratio'])/max(old['damping_ratio'], 1e-12)
+        def complex_shape(item):
+            return {name: complex(value, item.get('shape_imag', {}).get(name, 0)) for name, value in item['shape'].items()}
+        mac = shape_mac(complex_shape(mode), complex_shape(old))
+        mode.update(frequency_change=float(changes[row, col]), damping_change=float(delta),
+                    mac=mac, previous_mode=int(col+1), stability='frequencia')
+        if delta <= settings.damping_tolerance:
+            mode['stability'] = 'frequencia_amortecimento'
+            if mac is not None and mac >= settings.min_mac:
+                mode['stability'] = 'estavel'
+    return modes
+
+
+def stabilization_diagram(data, settings, stability, seeds=None):
+    """Refit real-mode accelerance models of 1..M modes (dynamic orders 2..2M).
+
+    This is a sweep of the existing constrained nonlinear model, not PolyMAX/SSI.
+    The residual terms do not add dynamic poles. Failed orders break matching.
+    """
+    stability.validate()
+    settings.validate(float(data.frequency[-1]))
+    df = float(np.median(np.diff(data.frequency)))
+    curve = indicator(data, settings)
+    detected = suggest_modes(data, replace(settings, max_modes=12))
+    candidates = list(seeds) if seeds is not None else detected
+    if not candidates or not np.isfinite(candidates).all() or any(not settings.fmin < f < settings.fmax for f in candidates):
+        raise ValueError('Sem candidatos para estabilização. Calcule/revise primeiro o ajuste modal.')
+    candidates = sorted(candidates, key=lambda f: -float(np.nan_to_num(curve[np.argmin(abs(data.frequency-f))], nan=0)))
+    # Add further observed peaks, then spread auxiliary candidates across the band.
+    for value in detected:
+        if all(abs(value-f) >= df for f in candidates):
+            candidates.append(value)
+    while len(candidates) < stability.max_modes:
+        edges = np.sort([settings.fmin, *candidates, settings.fmax])
+        gap = int(np.argmax(np.diff(edges)))
+        value = float((edges[gap]+edges[gap+1])/2)
+        if min(abs(value-f) for f in edges) < df:
+            break
+        candidates.append(value)
+    orders = []
+    previous = []
+    for count in range(1, stability.max_modes+1):
+        row = {'order': 2*count, 'requested_modes': count, 'modes': [], 'error': None}
+        try:
+            if len(candidates) < count:
+                raise ValueError('Resolução insuficiente para acrescentar candidatos distintos.')
+            result = fit_modes(data, settings, sorted(candidates[:count]))
+            row['modes'] = classify_stability(result['modes'], previous, stability)
+            row['max_relative_fit_error'] = max(result['relative_fit_error'].values())
+            row['warnings'] = result['warnings']
+            row['initial_frequencies_hz'] = result['initial_frequencies_hz']
+            previous = result['modes']
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            row['error'] = str(exc)
+            previous = []
+        orders.append(row)
+    return {'method': 'Varredura do ajuste modal real; ordem dinâmica = 2 × número de modos; resíduos sem polos',
+            'settings': asdict(stability), 'orders': orders,
+            'interpretation': 'Estabilidade numérica entre ordens adjacentes não certifica um modo físico. '
+                              'Avalie erro da FRF, resolução e observabilidade na referência.'}
