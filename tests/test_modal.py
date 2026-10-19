@@ -3,10 +3,39 @@ from pathlib import Path
 import unittest
 import numpy as np
 
-from ads1800_app.modal import ModalConfig, ImpactCapture, ModalSession, analyze_hit, ensemble, windows
+from ads1800_app.modal import ModalConfig, ImpactCapture, ModalSession, analyze_hit, ensemble, windows, spectral_densities
 
 
 class ModalTests(unittest.TestCase):
+    def test_density_normalization_matches_mean_square_and_complex_h1(self):
+        c = self.config()
+        rng = np.random.default_rng(42)
+        force = rng.normal(size=c.n)
+        F = np.fft.rfft(force)
+        ff, aa, af = spectral_densities(c, [{'F': F, 'A': -3*F}])
+        self.assertAlmostEqual(ff.sum()*c.sample_rate/c.n, np.mean(force**2))
+        np.testing.assert_allclose(af/ff, -3)
+        np.testing.assert_allclose(aa/ff, 9)
+
+    def test_contact_gap_and_acceleration_rail_evidence(self):
+        c = self.config(response_limits=(-100, 100))
+        data = np.zeros((c.n, 3))
+        data[:, 0] = np.arange(c.n)/c.sample_rate
+        data[c.pre:c.pre+7, 1] = [50, 30, 0, 30, 20, -15, 0]
+        data[c.pre, 2] = 99.5  # Former broad 0.5% criterion falsely flagged this.
+        issues = analyze_hit(c, data)['issues']
+        self.assertFalse(any('duplo' in s or 'saturação' in s for s in issues))
+        data[c.pre+10:c.pre+12, 1] = 15
+        self.assertTrue(any('duplo' in s for s in analyze_hit(c, data)['issues']))
+        c.double_hit_gap = .02
+        self.assertFalse(any('duplo' in s for s in analyze_hit(c, data)['issues']))
+        data[c.pre:c.pre+2, 2] = 99.9
+        self.assertTrue(any('Aceleração: possível saturação' in s for s in analyze_hit(c, data)['issues']))
+        data[c.pre:c.pre+2, 2] = [99.9, 0]
+        self.assertFalse(any('saturação' in s for s in analyze_hit(c, data)['issues']))
+        data[c.pre, 2] = 100
+        self.assertTrue(any('saturação' in s for s in analyze_hit(c, data)['issues']))
+
     def config(self, **kwargs):
         return ModalConfig(sample_rate=1000, bandpass_enabled=False, duration=.2, pretrigger=.02, force_width=.01,
                            force_window='Retangular', response_window='Retangular', **kwargs)

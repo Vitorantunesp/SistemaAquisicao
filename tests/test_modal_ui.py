@@ -8,9 +8,48 @@ import unittest
 from unittest.mock import patch
 from PyQt6.QtWidgets import QApplication
 from ads1800_app.ui.modal import ModalApp
+from ads1800_app.modal import ModalConfig, ModalSession, ImpactCapture
 
 
 class ModalUiTests(unittest.TestCase):
+    def test_ready_beep_adjustment_and_exit_with_missing_session_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            c = ModalConfig(sample_rate=1000, bandpass_enabled=False, duration=.2, pretrigger=.02, force_width=.01)
+            session = ModalSession(Path(directory)/'run', c)
+            window = ModalApp()
+            try:
+                window.adopt_session(session)
+                window.capture = ImpactCapture(c)
+                window.apply_trigger_settings(25, 'Negativo', .004)
+                self.assertEqual(ModalSession.load(session.directory).config.threshold, 25)
+                window.capture.arm('P1')
+                with patch('ads1800_app.ui.modal.QApplication.beep') as beep:
+                    window.announce_ready()
+                    beep.assert_not_called()
+                    window.capture.feed(np.arange(30)/1000, np.zeros(30), np.zeros(30))
+                    window.announce_ready()
+                    window.announce_ready()
+                    beep.assert_called_once()
+                window.capture.cancel()
+                data = np.zeros((c.n, 3))
+                data[:, 0] = np.arange(c.n)/1000
+                data[c.pre, 1:] = [-40, 3]
+                record, _ = session.capture('P1', data)
+                self.assertEqual(record['trigger']['threshold_N'], 25)
+                window.pending = record
+                # Moving the test folder reproduces a missing path without deletion.
+                session.directory.rename(Path(directory)/'moved')
+                with self.assertRaises(OSError):
+                    session.review(record, True)
+                self.assertEqual(record['status'], 'pendente')
+                window.leave_session()
+                self.assertIsNone(window.session)
+                self.assertIsNone(window.pending)
+                self.assertTrue(window.open_button.isEnabled())
+                self.assertEqual(window.tabs.currentIndex(), 0)
+            finally:
+                window.close()
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -59,7 +98,7 @@ class ModalUiTests(unittest.TestCase):
                 self.assertTrue(window.accept_button.isEnabled())
                 window.review(True)
                 self.assertEqual(len(window.session.hits('P1')), 1)
-                window.arm()
+                self.assertTrue(window.capture.armed)
                 self.wait(lambda: window.pending is not None)
                 window.review(True)
                 self.assertEqual(len(window.session.hits('P1')), 2)

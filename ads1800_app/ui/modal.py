@@ -14,7 +14,7 @@ from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QSpinBox, QTabWidget, QTextEdit,
-    QVBoxLayout, QWidget, QSplitter, QTableWidget, QTableWidgetItem)
+    QVBoxLayout, QWidget, QSplitter, QTableWidget, QTableWidgetItem, QDialog, QDialogButtonBox)
 
 from ads1800_app.backends.lynx import LynxBackend
 from ads1800_app.backends.modal_simulator import ModalSimulatorBackend
@@ -68,6 +68,7 @@ class ModalApp(QMainWindow):
         self.resize(1440, 940)
         self.backend = self.controller = self.capture = self.session = None
         self.pending = None
+        self.ready_announced = False
         self.channels = []
         self.busy = False
         self.events = queue.Queue(maxsize=300)
@@ -209,6 +210,8 @@ class ModalApp(QMainWindow):
         self.frf_view.addItems(FRF_VIEWS)
         frf_row.addWidget(self.frf_view)
         frf_row.addStretch()
+        self.trigger_button = self.button('Configurar trigger…', self.configure_trigger, frf_row)
+        self.leave_button = self.button('Sair do ensaio', self.leave_session, frf_row)
         layout.addLayout(frf_row)
         self.status.setWordWrap(True)
         self.status.setMaximumHeight(55)
@@ -454,10 +457,96 @@ class ModalApp(QMainWindow):
             self.error(exc)
 
     def arm(self):
+        if not self.capture or not self.controller or not self.controller.running or self.pending is not None:
+            return
+        if not self.session.directory.is_dir():
+            self.status.setText('Pasta do ensaio indisponível. Use Sair do ensaio para iniciar outro.')
+            return
         self.capture.arm(self.point.currentText())
+        self.ready_announced = False
         self.pending = None
-        self.status.setText('Armado: aguardando cruzamento do limiar de força após retornar abaixo de 50% do trigger.')
+        self.status.setText('Preparando trigger: aguarde o aviso sonoro antes da batida.')
         self.refresh()
+
+    def announce_ready(self):
+        if self.capture and self.capture.ready and not self.ready_announced:
+            self.ready_announced = True
+            QApplication.beep()
+            self.status.setText('Pronto — pode realizar a batida no ponto '+self.capture.point+'.')
+
+    def apply_trigger_settings(self, threshold, polarity, gap):
+        if not self.capture or self.capture.armed or self.pending is not None:
+            raise ValueError('Cancele a espera e conclua a revisão antes de ajustar o trigger.')
+        updated = replace(self.session.config, threshold=threshold, polarity=polarity, double_hit_gap=gap)
+        updated.validate()
+        previous = self.session.config
+        self.session.config = updated
+        try:
+            self.session.save_manifest()
+        except Exception:
+            self.session.config = previous
+            raise
+        self.capture.config = updated
+        self.fields['threshold'].setValue(threshold)
+        self.fields['polarity'].setCurrentText(polarity)
+        self.status.setText('Trigger atualizado para as próximas batidas. Arme quando estiver pronto.')
+
+    def configure_trigger(self):
+        if not self.capture or self.pending is not None:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Trigger durante o ensaio')
+        form = QFormLayout(dialog)
+        note = QLabel('Cancele a espera antes de ajustar. Alterações valem para as próximas batidas; duração, pré-trigger e janelas permanecem iguais.')
+        note.setWordWrap(True)
+        form.addRow(note)
+        c = self.capture.config
+        threshold = self.number(c.threshold, .0001, 1e9)
+        polarity = QComboBox()
+        polarity.addItems(['Absoluto', 'Positivo', 'Negativo'])
+        polarity.setCurrentText(c.polarity)
+        gap = self.number(c.double_hit_gap*1000, .001, c.duration*1000-.001)
+        form.addRow('Limiar de força [N]', threshold)
+        form.addRow('Polaridade', polarity)
+        form.addRow('Intervalo sem contato para impacto duplo [ms]', gap)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            try:
+                self.apply_trigger_settings(threshold.value(), polarity.currentText(), gap.value()/1000)
+            except Exception as exc:
+                self.error(exc)
+
+    def leave_session(self):
+        if self.busy:
+            return
+        if self.capture:
+            self.capture.cancel()
+        def cleared(_=None):
+            self.capture = self.session = self.pending = None
+            self.controller = None
+            self.live = DisplayBuffer(2)
+            self.live_filter = None
+            self.post.set_session(None)
+            self.point.clear()
+            self.history.setRowCount(0)
+            self.geometry.config = ModalConfig()
+            self.geometry.update()
+            for canvas in self.plots.values():
+                canvas.times = canvas.values = np.array([])
+                canvas.update()
+            self.folder.setText('Nenhum ensaio aberto.')
+            self.progress.setText('0 batidas')
+            self.quality.setText('Qualidade: aguardando ensaio.')
+            self.status.setText('Ensaio encerrado na interface. Capturas já salvas permanecem no disco, se disponível.')
+            self.tabs.setCurrentIndex(0)
+            self.refresh()
+        if self.controller and self.controller.running:
+            self.work(self.controller.stop, cleared)
+        else:
+            cleared()
 
     def cancel(self):
         self.capture.cancel()
@@ -510,7 +599,11 @@ class ModalApp(QMainWindow):
         if not self.session:
             return
         point = self.point.currentText()
-        hits = self.session.hits(point)
+        try:
+            hits = self.session.hits(point)
+        except OSError:
+            self.status.setText('Arquivos do ensaio indisponíveis. Use Sair do ensaio para continuar.')
+            return
         f, h1, coh = ensemble(self.session.config, hits)
         for key, (values, label, fixed) in zip(('frf', 'phase'), frf_components(h1, self.frf_view.currentIndex())):
             self.plot_labels[key].setText(f'FRF H1 — {label} × Hz')
@@ -542,6 +635,8 @@ class ModalApp(QMainWindow):
             self.update_history()
             self.results()
             self.status.setText('Revisão salva. Arme o trigger para a próxima batida ou selecione outro ponto.')
+            if accept and self.capture and self.controller and self.controller.running:
+                self.arm()
         except Exception as exc:
             self.error(exc)
         self.refresh()
@@ -551,7 +646,11 @@ class ModalApp(QMainWindow):
             return
         record = self.session.records[row]
         self.point.setCurrentText(record['point'])
-        self.show_hit(record)
+        try:
+            self.show_hit(record)
+        except OSError:
+            self.status.setText('Arquivo da captura indisponível. Use Sair do ensaio para continuar.')
+            return
         self.pending = record  # Existing decisions may be revised, recomputing averages.
         self.status.setText('Revisando captura selecionada; aceite ou rejeite para continuar.')
         self.refresh()
@@ -605,6 +704,7 @@ class ModalApp(QMainWindow):
                     display_values = self.live_filter.apply([force, acceleration]) if self.live_filter else [force, acceleration]
                     self.live.append(times, display_values)
                     result = self.capture.feed(times, force, acceleration)
+                    self.announce_ready()
                     if result:
                         self.pending, _ = self.session.capture(*result)
                         self.show_hit(self.pending)
@@ -643,6 +743,8 @@ class ModalApp(QMainWindow):
         self.arm_button.setEnabled(running and not armed and self.pending is None and not self.busy)
         self.cancel_button.setEnabled(armed and not self.busy)
         self.stop_button.setEnabled(running and not self.busy)
+        self.trigger_button.setEnabled(running and not armed and self.pending is None and not self.busy)
+        self.leave_button.setEnabled(self.session is not None and not self.busy)
         self.point.setEnabled(not armed and self.pending is None and not self.busy)
         self.accept_button.setEnabled(self.pending is not None and not self.busy)
         self.reject_button.setEnabled(self.pending is not None and not self.busy)

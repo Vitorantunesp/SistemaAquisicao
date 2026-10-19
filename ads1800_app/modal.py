@@ -21,6 +21,7 @@ class ModalConfig:
     pretrigger: float = .05
     threshold: float = 10
     polarity: str = 'Absoluto'
+    double_hit_gap: float = .002
     force_window: str = 'Força'
     response_window: str = 'Exponencial'
     force_width: float = .03
@@ -46,11 +47,13 @@ class ModalConfig:
 
     def validate(self):
         numbers = [self.sample_rate, self.duration, self.pretrigger, self.threshold,
-                   self.force_width, self.exponential_end, self.force_factor, self.response_factor]
+                   self.force_width, self.exponential_end, self.force_factor, self.response_factor, self.double_hit_gap]
         if not all(math.isfinite(x) for x in numbers):
             raise ValueError('Parâmetros devem ser finitos.')
         if self.sample_rate <= 0 or not 16 <= self.n <= 2_000_000:
             raise ValueError('O registro deve ter entre 16 e 2 milhões de amostras.')
+        if not 0 < self.double_hit_gap < self.duration:
+            raise ValueError('Intervalo de separação de contatos deve ser positivo e menor que o registro.')
         if self.bandpass_enabled:
             validate_bandpass(self.sample_rate, self.low_cut, self.high_cut)
         if not 2 <= self.pre < self.n - 4 or self.threshold <= 0:
@@ -126,6 +129,10 @@ class ImpactCapture:
         self.armed = False
         self.pending = None
 
+    @property
+    def ready(self):
+        return self.armed and self.pending is None and self.below and len(self.history) == self.config.pre
+
     def feed(self, times, force, acceleration):
         if not (len(times) == len(force) == len(acceleration)):
             self.cancel()
@@ -186,21 +193,41 @@ def analyze_hit(c, data):
     F, A = np.fft.rfft(processed_f*wf), np.fft.rfft(processed_a*wa)
     issues = []
     peak = float(np.max(abs(f)))
-    # Count separate contact regions, not local maxima inside one contact pulse.
-    contacts = abs(f[c.pre:]) > max(c.threshold, .2*peak)
-    starts = np.flatnonzero(contacts & ~np.r_[False, contacts[:-1]])
-    if len(starts) > 1:
-        issues.append('Possível impacto duplo')
     noise = float(np.std(f[:baseline]))
+    # Require a quiet interval between same-polarity contacts. Short threshold
+    # dips and opposite-polarity ringing are not new hammer contacts.
+    sign = 1 if f[np.argmax(abs(f))] >= 0 else -1
+    level = sign*f[c.pre:]
+    contact_level = max(.2*peak, 6*noise, 1e-12)
+    quiet_level = max(.05*peak, 3*noise, 1e-12)
+    gap_samples = max(1, math.ceil(c.double_hit_gap*c.sample_rate))
+    contacts, quiet, separated = 0, 0, True
+    for value in level:
+        if abs(value) <= quiet_level:
+            quiet += 1
+            if quiet >= gap_samples:
+                separated = True
+        else:
+            if value >= contact_level:
+                if separated:
+                    contacts += 1
+                    separated = False
+            quiet = 0
+    if contacts > 1:
+        issues.append(f'Possível impacto duplo ({contacts} contatos; separação mínima {c.double_hit_gap*1000:g} ms)')
     snr = float(20*np.log10(max(peak, 1e-30)/max(noise, 1e-15)))
     if snr < 20:
         issues.append('Força com baixo sinal/ruído (<20 dB)')
     for label, signal, limits in [('Força', data[:, 1], c.force_limits), ('Aceleração', data[:, 2], c.response_limits)]:
         if limits is not None:
             low, high = limits
-            margin = .005*(high-low)
-            if np.any(signal <= low+margin) or np.any(signal >= high-margin):
-                issues.append(f'{label}: próximo ao limite / possível saturação')
+            margin = .001*(high-low)
+            near_low, near_high = signal <= low+margin, signal >= high-margin
+            repeated = np.any(near_low[1:] & near_low[:-1]) or np.any(near_high[1:] & near_high[:-1])
+            if np.any(signal <= low) or np.any(signal >= high) or repeated:
+                issues.append(f'{label}: possível saturação (limite atingido ou amostras consecutivas a 0,1% da faixa)')
+            elif np.any(near_low | near_high):
+                issues.append(f'{label}: pico isolado próximo ao limite; conferir sinal')
     tail = np.sqrt(np.mean(a[-max(2, c.n//10):]**2))
     rms = np.sqrt(np.mean(a[c.pre:]**2))
     decay = float(tail/max(rms, 1e-30))
@@ -214,15 +241,26 @@ def analyze_hit(c, data):
             'peak_N': peak, 'snr_dB': snr, 'tail_ratio': decay, 'issues': issues}
 
 
+def spectral_densities(c, hits):
+    """One-sided densities of the windowed records, per Hz (no window gain correction).
+
+    The common 1/(fs*N) scale cancels in H1 and coherence, including when
+    force and response have different acquisition windows.
+    """
+    F = np.asarray([h['F'] for h in hits])
+    A = np.asarray([h['A'] for h in hits])
+    scale = np.full(c.n//2+1, 1/(c.sample_rate*c.n))
+    scale[1:-1 if c.n % 2 == 0 else None] *= 2
+    return (np.mean(abs(F)**2, axis=0)*scale,
+            np.mean(abs(A)**2, axis=0)*scale,
+            np.mean(A*np.conj(F), axis=0)*scale)
+
+
 def ensemble(c, hits):
     freq = np.fft.rfftfreq(c.n, 1/c.sample_rate)
     if not hits:
         return freq, np.full(len(freq), np.nan, complex), np.full(len(freq), np.nan)
-    F = np.asarray([h['F'] for h in hits])
-    A = np.asarray([h['A'] for h in hits])
-    ff = np.mean(abs(F)**2, axis=0)
-    aa = np.mean(abs(A)**2, axis=0)
-    af = np.mean(A*np.conj(F), axis=0)
+    ff, aa, af = spectral_densities(c, hits)
     valid = (ff > max(float(ff.max())*1e-10, 1e-30)) & (aa > 1e-30)
     if c.bandpass_enabled:
         valid &= (freq >= c.low_cut) & (freq <= c.high_cut)
@@ -283,6 +321,8 @@ class ModalSession:
         np.savez_compressed(self.directory/filename, time=data[:, 0], force_N=data[:, 1],
                             acceleration_m_s2=data[:, 2], F=analysis['F'], A=analysis['A'])
         record = {'point': point, 'file': filename, 'status': 'pendente',
+                  'trigger': {'threshold_N': self.config.threshold, 'polarity': self.config.polarity,
+                              'double_hit_gap_s': self.config.double_hit_gap},
                   **{key: analysis[key] for key in ('peak_N', 'snr_dB', 'tail_ratio', 'issues')}}
         self.records.append(record)
         self.save_manifest()
@@ -297,9 +337,14 @@ class ModalSession:
         return hits
 
     def review(self, record, accept):
+        previous = record['status']
         record['status'] = 'aceita' if accept else 'rejeitada'
-        self.save_manifest()
-        freq, h1, coherence = ensemble(self.config, self.hits(record['point']))
+        try:
+            freq, h1, coherence = ensemble(self.config, self.hits(record['point']))
+            self.save_manifest()
+        except Exception:
+            record['status'] = previous
+            raise
         # Filenames use numeric indices, never user-supplied point names.
         index = [p[0] for p in self.config.points].index(record['point']) + 1
         np.savetxt(self.directory/f'frf_ponto_{index}.csv',

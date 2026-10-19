@@ -24,13 +24,28 @@ continuam disponíveis para os programas anteriores.
    configuração, metadados dos canais, sinais e resultados.
 6. Na segunda aba, escolha o ponto e clique **Armar trigger**. Após preencher o
    pré-trigger e observar força abaixo de 50% do limiar, o próximo cruzamento
-   dispara uma captura. Há polaridade absoluta, positiva ou negativa.
+   dispara uma captura. Um aviso sonoro e a mensagem **Pronto** indicam quando
+   o operador pode bater. Há polaridade absoluta, positiva ou negativa.
 7. Confira os sinais, FFTs e alertas. **Aceitar batida** inclui a captura nas médias
    daquele ponto; **Rejeitar batida** preserva os dados, mas os exclui das médias.
-   Arme novamente para repetir. A meta de médias é orientativa e não limita capturas.
+   Ao aceitar, o trigger é rearmado automaticamente se a aquisição continuar ativa;
+   aguarde novamente o aviso sonoro. Rejeitar não rearma automaticamente.
+   A meta de médias é orientativa e não limita capturas.
 8. Troque o ponto com o sistema desarmado e sem revisão pendente. O acelerômetro
    permanece na mesma posição. **Parar aquisição** cancela registros incompletos,
    preservando capturas completas para revisão.
+
+Durante a aquisição, use **Cancelar espera** e **Configurar trigger…** para mudar
+o limiar em N, a polaridade e o intervalo mínimo sem contato para detectar impacto
+duplo (padrão 2 ms). Conclua a revisão pendente antes de alterar. Duração,
+pré-trigger e janelas são mantidos para garantir registros compatíveis nas médias.
+As próximas capturas registram os parâmetros de trigger utilizados; os alertas
+das capturas anteriores permanecem preservados.
+
+**Sair do ensaio** interrompe a aquisição, libera a revisão pendente na interface
+e retorna à configuração, sem apagar capturas já salvas. Funciona mesmo quando
+a pasta foi removida ou ficou indisponível. Uma captura incompleta é descartada;
+batidas completas ainda pendentes permanecem nesse estado no disco disponível.
 
 As curvas temporais mostram dados em SI com passa-banda quando ativado; as FFTs
 usam os sinais com remoção de linha de base, passa-banda e janelamento. Enquanto armado, os gráficos temporais
@@ -73,6 +88,11 @@ Referência para escolha das janelas: [NI — Understanding FFTs and Windowing](
 - Para cada ponto, `H1 = média(A · conjugado(F)) / média(|F|²)`, em `(m/s²)/N`.
   São mostrados módulo e fase principal em graus. As médias são espectrais,
   com pesos iguais, sem misturar pontos e sem fazer média dos quocientes individuais.
+  O cálculo explicita as densidades unilaterais `G_AF` e `G_FF`, com fator
+  comum `1/(fs·N)` e duplicação dos bins internos: `H1 = G_AF/G_FF`.
+  São densidades dos sinais já janelados, sem correção de ganho das janelas.
+  O fator comum cancela no quociente. O estimador anterior já usava os produtos
+  espectrais corretos; não se substitui H1 por `G_AA/G_FF`, que perderia a fase.
 - Coerência: `|média(A · conjugado(F))|² / (média(|F|²) · média(|A|²))`.
   É omitida até haver duas batidas aceitas. Duas são o mínimo matemático; várias
   repetições são necessárias para uma avaliação robusta. Coerência alta isolada
@@ -83,8 +103,14 @@ Referência para escolha das janelas: [NI — Understanding FFTs and Windowing](
 - FFT unilateral de amplitude: `|FFT|/N`, duplicando os bins internos, sem duplicar
   DC ou Nyquist. Não há correção de ganho coerente das janelas. Para transitórios,
   as amplitudes dependem do comprimento do registro e da janela; não são PSD.
-- Alertas: contatos separados acima de 20% do pico e do limiar (possível impacto
-  duplo), proximidade de 0,5% dos limites de engenharia (possível saturação),
+- Alertas: contatos de mesma polaridade acima de 20% do pico ou seis desvios
+  do ruído (o maior), separados por pelo menos 2 ms abaixo de 5% do pico ou três
+  desvios do ruído (o maior). O intervalo é ajustável; pequenas interrupções e
+  oscilações de polaridade oposta não são contadas como novos contatos.
+  Possível saturação requer atingir/exceder um limite de engenharia ou duas
+  amostras consecutivas próximas do mesmo limite (margem de 0,1% da faixa).
+  Um pico isolado nessa margem recebe apenas aviso de proximidade do limite.
+  Sem limites de engenharia conhecidos não se infere saturação. Outros alertas:
   força com S/R abaixo de 20 dB, RMS no último décimo do registro acima de 20%
   do RMS pós-trigger, e força fora da janela acima de 5% do pico.
 - Os critérios são heurísticos, não certificam a batida e não a rejeitam automaticamente.
