@@ -50,6 +50,15 @@ class PostUiTests(unittest.TestCase):
                 self.assertTrue(post.export.isEnabled())
                 self.assertTrue(post.report_button.isEnabled())
                 report_path = Path(folder)/'relatorio.html'
+                # Missing report modules must be caught in the worker, never escape a Qt slot.
+                with patch.dict('sys.modules', {'ads1800_app.modal_report_runner': None}), patch('ads1800_app.ui.modal_post.QFileDialog.getSaveFileName', return_value=(str(report_path), '')):
+                    post.make_report()
+                    self.wait(lambda: not window.busy)
+                self.assertEqual(len(errors), 1)
+                errors.clear()
+                self.assertIsNotNone(post.result)
+                self.assertTrue(post.report_button.isEnabled())
+                self.assertIn('não gerado', post.summary.text())
                 with patch('ads1800_app.ui.modal_post.QFileDialog.getSaveFileName', return_value=(str(report_path), '')):
                     post.make_report()
                 self.wait(lambda: not window.busy)

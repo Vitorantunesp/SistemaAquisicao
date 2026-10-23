@@ -349,6 +349,10 @@ class PostPanel(QWidget):
         self.owner.work(lambda: reconstruct_ema(context, selected), self.display)
 
     def refresh(self, running, busy):
+        if getattr(self, 'reporting', False) and not busy:
+            self.reporting = False
+            if self.summary.text() == 'Gerando relatório e figuras…':
+                self.summary.setText('Relatório não gerado. Os resultados continuam disponíveis; confira a mensagem de erro e tente novamente.')
         if self.computing and not busy:
             self.computing = False
             if self.result is None:
@@ -479,7 +483,6 @@ class PostPanel(QWidget):
     def make_report(self):
         if self.owner.busy or self.result is None or not self.result['modes']:
             return
-        from ads1800_app.modal_report import generate_report
         default = self.session.directory/f'relatorio_modal_{datetime.now():%Y%m%d_%H%M%S}.html'
         path, _ = QFileDialog.getSaveFileName(self, 'Salvar relatório modal', str(default), 'Relatório HTML (*.html)')
         if not path:
@@ -487,7 +490,14 @@ class PostPanel(QWidget):
         identification = 'MIMO' if self.identification.currentIndex() == 1 else 'MISO'
         reference = self.reference.currentIndex()
         session, result = self.session, self.result
-        self.owner.work(lambda: generate_report(session, result, path, identification, reference),
+        def generate():
+            # Import inside the guarded worker: missing report files/dependencies
+            # must never escape a Qt slot and terminate the application.
+            from ads1800_app.modal_report_runner import generate_report_isolated
+            return generate_report_isolated(session, result, path, identification, reference)
+        self.summary.setText('Gerando relatório e figuras…')
+        self.reporting = True
+        self.owner.work(generate,
                         lambda output: self.summary.setText(f'Relatório salvo em {output}. Abra no navegador para visualizar ou imprimir em PDF.'))
 
     def save(self):
