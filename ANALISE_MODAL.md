@@ -173,16 +173,13 @@ validada na bancada com os sensores e o ADS 1800 conectados.
 
 ### Vários acelerômetros no mesmo ensaio
 
-O acelerômetro dos campos originais é **A1**. Para incluir outros, preencha
-**Acelerômetros adicionais** na configuração, um por linha:
-
-```text
-A2; 3; 0.8; 0.25; 1
-A3; 4; 0.2; 0.25; 9.80665
-```
-
-As colunas são `nome; CH; X; Y; fator SI`. CH começa em 1, como no seletor do
-equipamento; no exemplo, A2 usa CH 3 e A3 usa CH 4. Cada sensor e o martelo devem
+O acelerômetro dos campos originais é **A1**. Para incluir outros, conecte ao
+equipamento ou simulador e clique **Adicionar acelerômetro** na configuração.
+Cada linha possui nome, **seletor de canal**, X, Y e fator SI. O seletor mostra
+o número CH, nome e unidade informados pelo equipamento. Use **Remover selecionado**
+para excluir uma linha. Configurações salvas restauram as escolhas; um canal
+ausente após reconectar é marcado como indisponível e precisa ser corrigido.
+Cada sensor e o martelo devem
 usar canais distintos e disponíveis. Coordenadas são em metros; o fator converte
 as unidades de engenharia do canal para m/s². Todos medem em Z, perpendicular
 ao plano da peça. Os sensores permanecem fixos enquanto o martelo muda de ponto.

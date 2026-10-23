@@ -25,6 +25,7 @@ from ads1800_app.monitor_signal import StreamingBandpass
 from ads1800_app.ui.plots import ChannelCanvas, DisplayBuffer
 from ads1800_app.ui.modal_post import PostPanel
 from ads1800_app.ui.frf_view import FRF_VIEWS, frf_components
+from ads1800_app.ui.modal_sensors import SensorTable
 
 
 class Geometry(QWidget):
@@ -170,10 +171,8 @@ class ModalApp(QMainWindow):
         self.ax, self.ay = self.number(.5, -1e6, 1e6), self.number(.25, -1e6, 1e6)
         shape.addRow('Acelerômetro fixo — X [m]', self.ax)
         shape.addRow('Acelerômetro fixo — Y [m]', self.ay)
-        self.extra_sensors = QTextEdit()
-        self.extra_sensors.setMaximumHeight(110)
-        self.extra_sensors.setPlaceholderText('A2; 3; 0.8; 0.25; 1\nA3; 4; 0.2; 0.25; 9.80665')
-        shape.addRow('Acelerômetros adicionais: nome; CH (1…); X; Y [m]; fator SI', self.extra_sensors)
+        self.extra_sensors = SensorTable()
+        shape.addRow('Acelerômetros adicionais (canais do equipamento conectado)', self.extra_sensors)
         self.preview = Geometry()
         shape.addRow(self.preview)
         self.button('Atualizar desenho', self.preview_geometry, shape)
@@ -300,12 +299,14 @@ class ModalApp(QMainWindow):
             def disconnected(_):
                 self.backend = self.controller = None
                 self.connection.setText('Desconectado')
+                self.extra_sensors.set_channels([])
             self.work(backend.disconnect, disconnected)
             return
         backend = ModalSimulatorBackend() if self.mode.currentIndex() == 0 else LynxBackend()
         def connected(info):
             self.backend = backend
             self.channels = info.channels
+            self.extra_sensors.set_channels(self.channels)
             self.connection.setText(info.name)
             for combo in (self.force_channel, self.response_channel):
                 combo.clear()
@@ -334,14 +335,7 @@ class ModalApp(QMainWindow):
                         outline=rows(self.outline), points=rows(self.points, True), accelerometer=[self.ax.value(), self.ay.value()],
                         force_channel=self.force_channel.currentData() if self.force_channel.count() else 0,
                         response_channel=self.response_channel.currentData() if self.response_channel.count() else 1)
-        for line in self.extra_sensors.toPlainText().splitlines():
-            if not line.strip():
-                continue
-            items = [v.strip() for v in line.split(';')]
-            if len(items) != 5:
-                raise ValueError('Acelerômetros adicionais: nome; CH; X; Y; fator SI, um por linha.')
-            c.additional_accelerometers.append(dict(name=items[0], channel=int(items[1])-1,
-                position=[float(v.replace(',', '.')) for v in items[2:4]], factor=float(items[4].replace(',', '.')), limits=None))
+        c.additional_accelerometers = self.extra_sensors.sensors()
         if require_channels:
             by_id = {ch.number: ch for ch in self.channels}
             if any(s['channel'] not in by_id for s in c.sensors) or c.force_channel not in by_id:
@@ -403,7 +397,7 @@ class ModalApp(QMainWindow):
             self.points.setPlainText('\n'.join('; '.join(map(str, row)) for row in c.points))
             self.ax.setValue(c.accelerometer[0])
             self.ay.setValue(c.accelerometer[1])
-            self.extra_sensors.setPlainText('\n'.join(f"{s['name']}; {s['channel']+1}; {s['position'][0]}; {s['position'][1]}; {s['factor']}" for s in c.additional_accelerometers))
+            self.extra_sensors.set_sensors(c.additional_accelerometers)
             for combo, channel in [(self.force_channel, c.force_channel), (self.response_channel, c.response_channel)]:
                 if combo.findData(channel) >= 0:
                     combo.setCurrentIndex(combo.findData(channel))

@@ -21,7 +21,9 @@ class ModalUiTests(unittest.TestCase):
             self.wait(lambda: not window.busy)
             window.fields['duration'].setValue(.5)
             # Noncontiguous hardware channels must follow the configured sensor order.
-            window.extra_sensors.setPlainText('A2; 4; 0.8; 0.25; 2\nA3; 3; 0.2; 0.25; 1')
+            window.extra_sensors.set_sensors([
+                dict(name='A2', channel=3, position=[.8, .25], factor=2),
+                dict(name='A3', channel=2, position=[.2, .25], factor=1)])
             with tempfile.TemporaryDirectory() as folder:
                 with patch('ads1800_app.ui.modal.QFileDialog.getExistingDirectory', return_value=folder):
                     window.start()
