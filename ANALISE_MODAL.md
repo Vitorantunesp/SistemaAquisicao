@@ -14,7 +14,7 @@ continuam disponíveis para os programas anteriores.
    Faixas de saturação são obtidas do equipamento e convertidas pelos mesmos fatores.
 3. Informe o contorno da peça por vértices XY em metros, na ordem da borda,
    e um ponto de impacto por linha (`nome; x; y`). Os nomes devem ser únicos.
-   Não há quantidade fixa de pontos. A posição XY do acelerômetro é fixa durante
+   Não há quantidade fixa de pontos. A posição XY de cada acelerômetro é fixa durante
    todo o ensaio. Força e aceleração são normais ao plano XY, em Z.
 4. Ajuste a taxa, o registro total (inclui o pré-trigger), o limiar em N e as janelas.
    O passa-banda fica ativado inicialmente entre **1 e 500 Hz**, com amostragem
@@ -166,10 +166,51 @@ de 35 e 90 Hz. Serve para experimentar o fluxo e verificar a apresentação; nã
 usa a geometria para resolver um modelo físico da peça.
 
 Esta versão implementa aquisição, análise de FRFs e pós-processamento modal,
-com um acelerômetro fixo. A conexão real reutiliza o driver existente; deve ser
+com um ou mais acelerômetros fixos. A conexão real reutiliza o driver existente; deve ser
 validada na bancada com os sensores e o ADS 1800 conectados.
 
 ## Pós-processamento: frequências, amortecimentos e formas modais
+
+### Vários acelerômetros no mesmo ensaio
+
+O acelerômetro dos campos originais é **A1**. Para incluir outros, preencha
+**Acelerômetros adicionais** na configuração, um por linha:
+
+```text
+A2; 3; 0.8; 0.25; 1
+A3; 4; 0.2; 0.25; 9.80665
+```
+
+As colunas são `nome; CH; X; Y; fator SI`. CH começa em 1, como no seletor do
+equipamento; no exemplo, A2 usa CH 3 e A3 usa CH 4. Cada sensor e o martelo devem
+usar canais distintos e disponíveis. Coordenadas são em metros; o fator converte
+as unidades de engenharia do canal para m/s². Todos medem em Z, perpendicular
+ao plano da peça. Os sensores permanecem fixos enquanto o martelo muda de ponto.
+O desenho identifica as posições de todos eles.
+
+Um único trigger captura força e todas as acelerações simultaneamente, com os
+mesmos tempos e janelas. A aceitação/rejeição vale para a batida completa. Os
+alertas identificam o sensor, e a lista **Acelerômetro** alterna o sinal temporal,
+FFT, FRF e coerência exibidos. Os demais canais continuam sendo gravados.
+
+No pós-processamento, escolha o **Acelerômetro de referência para a identificação**
+e calcule. Cada cálculo usa as FRFs dos pontos de impacto para essa referência;
+não há ajuste conjunto de várias referências nesta versão. Trocar a referência
+invalida os modos anteriores para evitar misturar resultados. Exporte cada
+resultado antes de trocar, se desejar conservá-lo; o relatório registra a referência.
+
+Ensaios antigos com um acelerômetro continuam compatíveis. Ensaios com vários
+sensores usam o formato de sessão 2 e incluem nos NPZ `accelerations_m_s2`
+(amostras × sensores) e `responses_A` (sensores × frequências), na ordem da
+configuração. As colunas antigas continuam representando A1. As FRFs de A1
+mantêm o nome original; as demais têm sufixo `_acelerometro_2`, `_acelerometro_3`,
+etc. A exportação de sinais inclui todos os acelerômetros, com seus nomes.
+
+O simulador oferece um martelo e sete canais de aceleração para experimentar
+o fluxo; suas respostas são sintéticas e não derivam da geometria cadastrada.
+O importador de CSV histórico continua limitado a um acelerômetro, pois seu
+formato possui apenas tempo, força e uma resposta; remova os adicionais antes
+de usar essa importação.
 
 Na aba **3. Pós-processamento modal**, após parar a aquisição ou abrir um ensaio salvo:
 

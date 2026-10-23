@@ -178,6 +178,13 @@ class PostPanel(QWidget):
         grid.addWidget(QLabel('Tolerâncias entre ordens adjacentes'), 6, 2)
         grid.addLayout(tolerances, 7, 2)
         layout.addWidget(self.controls)
+        reference_row = QHBoxLayout()
+        reference_row.addWidget(QLabel('Acelerômetro de referência para a identificação:'))
+        self.reference = QComboBox()
+        self.reference.addItem('A1')
+        self.reference.currentIndexChanged.connect(self.reference_changed)
+        reference_row.addWidget(self.reference)
+        layout.addLayout(reference_row)
         row = QHBoxLayout()
         self.calculate = QPushButton('Calcular frequências, amortecimentos e modos')
         self.calculate.clicked.connect(self.compute)
@@ -273,6 +280,11 @@ class PostPanel(QWidget):
 
     def set_session(self, session):
         self.session = session
+        self.reference.blockSignals(True)
+        self.reference.clear()
+        if session:
+            self.reference.addItems([s['name'] for s in session.config.sensors])
+        self.reference.blockSignals(False)
         self.view.config = session.config if session else None
         if session:
             nyquist = session.config.sample_rate/2
@@ -280,6 +292,11 @@ class PostPanel(QWidget):
             high = session.config.high_cut if session.config.bandpass_enabled else nyquist
             self.fields['fmax'].setValue(min(max(200, low+(high-low)/2), high))
             self.fields['fmin'].setValue(max(low, min(5, high/10)))
+        self.invalidate()
+
+    def reference_changed(self, *_):
+        if self.session and self.reference.currentIndex() >= 0:
+            self.view.config = self.session.config.for_sensor(self.reference.currentIndex())
         self.invalidate()
 
     def invalidate(self, *_):
@@ -324,6 +341,7 @@ class PostPanel(QWidget):
                 self.summary.setText('Cálculo não concluído. Confira a mensagem de erro e revise os parâmetros.')
         allowed = self.session is not None and not running and not busy and self.owner.pending is None
         self.controls.setEnabled(not busy)
+        self.reference.setEnabled(not busy)
         self.calculate.setEnabled(allowed)
         self.export.setEnabled(allowed and self.result is not None)
         self.apply_poles.setEnabled(allowed and self.result is not None and '_ema_context' in self.result)
@@ -343,13 +361,14 @@ class PostPanel(QWidget):
         self.summary.setText('Recalculando FRFs aceitas e ajustando os modos…')
         self.computing = True
         session = self.session
+        sensor = max(0, self.reference.currentIndex())
         engine = self.engine.currentIndex()
         order = self.polynomial_order.value()
         stability = StabilitySettings(frequency_tolerance=self.stability_fields['frequency_tolerance'].value()/100,
                                       damping_tolerance=self.stability_fields['damping_tolerance'].value()/100,
                                       min_mac=self.stability_fields['min_mac'].value())
-        self.owner.work(lambda: identify_ema(prepare_data(session, settings), settings, seeds, order, stability)
-                        if engine == 0 else fit_modes(prepare_data(session, settings), settings, seeds), self.display)
+        self.owner.work(lambda: identify_ema(prepare_data(session, settings, sensor), settings, seeds, order, stability)
+                        if engine == 0 else fit_modes(prepare_data(session, settings, sensor), settings, seeds), self.display)
 
     def display(self, result):
         self.computing = False
@@ -441,7 +460,10 @@ class PostPanel(QWidget):
             directory = self.session.directory/f'pos_processamento_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}'
             # Include geometry so exported relative shapes remain self-contained.
             report = dict(self.result, geometry={'outline': self.session.config.outline,
-                          'points': self.session.config.points, 'accelerometer': self.session.config.accelerometer},
+                          'points': self.session.config.points,
+                          'accelerometer': self.session.config.sensors[self.reference.currentIndex()]['position'],
+                          'accelerometers': self.session.config.sensors},
+                          reference_accelerometer=self.session.config.sensors[self.reference.currentIndex()],
                           bandpass={'enabled': self.session.config.bandpass_enabled,
                                     'low_hz': self.session.config.low_cut, 'high_hz': self.session.config.high_cut,
                                     'method': 'Butterworth SOS causal; protótipo ordem 4; antes do janelamento'})

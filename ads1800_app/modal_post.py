@@ -49,9 +49,10 @@ class ModalData:
     source_records: list
 
 
-def prepare_data(session, settings):
+def prepare_data(session, settings, sensor=0):
     """Rebuild only accepted ensembles, using original SI records, not old windows."""
-    c = session.config
+    c = session.config.for_sensor(sensor)
+    sensor_name = session.config.sensors[sensor]['name']
     settings.validate(c.sample_rate/2)
     if c.bandpass_enabled and not c.low_cut <= settings.fmin < settings.fmax <= c.high_cut:
         raise ValueError(f'A faixa do ajuste deve ficar dentro do passa-banda do ensaio ({c.low_cut:g} a {c.high_cut:g} Hz).')
@@ -66,14 +67,16 @@ def prepare_data(session, settings):
         hits = []
         for record in records:
             with np.load(session.directory/record['file'], allow_pickle=False) as saved:
-                f, a = saved['force_N'].copy(), saved['acceleration_m_s2'].copy()
+                f = saved['force_N'].copy()
+                a = (saved['acceleration_m_s2'] if sensor == 0 else saved['accelerations_m_s2'][:, sensor]).copy()
             if f.shape != (c.n,) or a.shape != (c.n,) or not np.isfinite([f, a]).all():
                 raise ValueError(f'{name}: captura inválida.')
             f, a = processed_signals(c, f, a)
             hits.append({'F': np.fft.rfft(f*window), 'A': np.fft.rfft(a*window)})
-            sources.append({'point': name, 'file': record['file']})
-            if record.get('issues'):
-                warnings.append(f"{name}: batida aceita com alertas: {', '.join(record['issues'])}.")
+            sources.append({'point': name, 'file': record['file'], 'accelerometer': sensor_name})
+            issues = record.get('sensors', {}).get(sensor_name, record).get('issues', [])
+            if issues:
+                warnings.append(f"{name} / {sensor_name}: batida aceita com alertas: {', '.join(issues)}.")
         freq, h, coherence = ensemble(c, hits)
         ids.append(name)
         counts.append(len(hits))

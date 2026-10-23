@@ -11,9 +11,9 @@ class ModalSimulatorBackend(SimulatorBackend):
 
     def connect(self, ip):
         self._connected = True
-        return DeviceInfo('Simulador modal — modos 35 e 90 Hz', ip, 2, list(ADS1800_SAMPLE_RATES), [
+        return DeviceInfo('Simulador modal — modos 35 e 90 Hz', ip, 8, list(ADS1800_SAMPLE_RATES), [
             ChannelConfig(0, name='Martelo', unit='N', engineering_min=-500, engineering_max=500),
-            ChannelConfig(1, name='Acelerômetro', unit='m/s²', engineering_min=-100, engineering_max=100)])
+            *[ChannelConfig(i, name=f'Acelerômetro {i}', unit='m/s²', engineering_min=-100, engineering_max=100) for i in range(1, 8)]])
 
     def start(self, *args, **kwargs):
         super().start(*args, **kwargs)
@@ -36,4 +36,5 @@ class ModalSimulatorBackend(SimulatorBackend):
             acceleration += response
         values = [force+self.rng.normal(0, .02, len(times)),
                   acceleration+self.rng.normal(0, .0002, len(times))]
+        values.extend(((-1)**i)*(1+i*.2)*acceleration+self.rng.normal(0, .0002, len(times)) for i in range(1, 7))
         return times, [values[c.number].tolist() for c in self._channels]

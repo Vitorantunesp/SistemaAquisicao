@@ -1,5 +1,5 @@
 """Roving-hammer acquisition and ensemble H1 accelerance (SI units)."""
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from collections import deque
 from pathlib import Path
 import json
@@ -36,6 +36,17 @@ class ModalConfig:
     outline: list = field(default_factory=lambda: [[0, 0], [1, 0], [1, .5], [0, .5]])
     points: list = field(default_factory=lambda: [['P1', .1, .25], ['P2', .5, .25], ['P3', .9, .25]])
     accelerometer: list = field(default_factory=lambda: [.5, .25])
+    additional_accelerometers: list = field(default_factory=list)
+
+    @property
+    def sensors(self):
+        return [dict(name='A1', channel=self.response_channel, position=self.accelerometer,
+                     factor=self.response_factor, limits=self.response_limits), *self.additional_accelerometers]
+
+    def for_sensor(self, index):
+        sensor = self.sensors[index]
+        return replace(self, response_channel=sensor['channel'], accelerometer=sensor['position'],
+                       response_factor=sensor['factor'], response_limits=sensor.get('limits'), additional_accelerometers=[])
 
     @property
     def n(self):
@@ -85,6 +96,19 @@ class ModalConfig:
         for limits in (self.force_limits, self.response_limits):
             if limits is not None and (len(limits) != 2 or not all(math.isfinite(v) for v in limits) or limits[0] >= limits[1]):
                 raise ValueError('Limites de engenharia inválidos.')
+        channels, names = {self.force_channel, self.response_channel}, {'A1'}
+        for sensor in self.additional_accelerometers:
+            try:
+                name, channel = sensor['name'], sensor['channel']
+                if not isinstance(name, str) or not name.strip() or name != name.strip() or name in names or any(v in name for v in ';\r\n'):
+                    raise ValueError('Nomes dos acelerômetros devem ser únicos; A1 é reservado ao primeiro.')
+                if not isinstance(channel, int) or channel < 0 or channel in channels:
+                    raise ValueError('Cada acelerômetro e martelo deve usar um canal distinto.')
+                self.for_sensor(len(names)).validate()
+                names.add(name)
+                channels.add(channel)
+            except (KeyError, TypeError, IndexError) as exc:
+                raise ValueError('Configuração de acelerômetro adicional inválida.') from exc
 
     @classmethod
     def from_dict(cls, values):
@@ -134,20 +158,26 @@ class ImpactCapture:
         return self.armed and self.pending is None and self.below and len(self.history) == self.config.pre
 
     def feed(self, times, force, acceleration):
+        acceleration = np.asarray(acceleration)
+        if acceleration.ndim == 1:
+            acceleration = acceleration[:, None]
+        if acceleration.shape != (len(times), len(self.config.sensors)):
+            self.cancel()
+            raise ValueError('Quantidade de acelerômetros incompatível com a configuração.')
         if not (len(times) == len(force) == len(acceleration)):
             self.cancel()
             raise ValueError('Bloco com tamanhos de canais diferentes.')
         result = None
         c = self.config
         for t, f, a in zip(times, force, acceleration):
-            if not all(np.isfinite([t, f, a])) or (self.last_time is not None and
+            if not np.isfinite([t, f, *a]).all() or (self.last_time is not None and
                     not .5 / c.sample_rate < t-self.last_time < 1.5 / c.sample_rate):
                 self.cancel()
                 self.history.clear()
                 self.last_time = None
                 raise ValueError('Descontinuidade ou amostras inválidas: batida cancelada; rearme.')
             self.last_time = t
-            row = (t, f, a)
+            row = (t, f, *a)
             if self.pending is not None:
                 self.pending.append(row)
                 if len(self.pending) == c.n:
@@ -287,7 +317,7 @@ class ModalSession:
     def load(cls, directory):
         directory = Path(directory).resolve()
         payload = json.loads((directory/'session.json').read_text(encoding='utf-8'))
-        if payload.get('schema') != 1:
+        if payload.get('schema') not in (1, 2):
             raise ValueError('Versão de ensaio não suportada.')
         config = ModalConfig.from_dict(payload['config'])
         config.validate()
@@ -303,50 +333,66 @@ class ModalSession:
                     expected = config.n//2+1 if name in ('F', 'A') else config.n
                     if data[name].shape != (expected,) or not np.isfinite(data[name]).all():
                         raise ValueError('Arquivo de captura incompleto ou inválido.')
+                if len(config.sensors) > 1:
+                    for key, shape in [('accelerations_m_s2', (config.n, len(config.sensors))),
+                                       ('responses_A', (len(config.sensors), config.n//2+1))]:
+                        if key not in data or data[key].shape != shape or not np.isfinite(data[key]).all():
+                            raise ValueError('Arquivo com acelerômetros incompletos ou inválidos.')
         session = cls.__new__(cls)
         session.directory, session.config = directory, config
         session.records, session.metadata = records, payload.get('acquisition', {})
         return session
 
     def save_manifest(self):
-        payload = {'schema': 1, 'strategy': 'roving hammer', 'axis': '+Z (normal ao plano XY)',
+        payload = {'schema': 2 if self.config.additional_accelerometers else 1, 'strategy': 'roving hammer', 'axis': '+Z (normal ao plano XY)',
                    'config': asdict(self.config), 'acquisition': self.metadata, 'records': self.records}
         temporary = self.directory/'session.tmp'
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
         temporary.replace(self.directory/'session.json')
 
     def capture(self, point, data):
-        analysis = analyze_hit(self.config, data)
+        if point not in [p[0] for p in self.config.points] or data.shape != (self.config.n, 2+len(self.config.sensors)):
+            raise ValueError('Ponto ou quantidade de canais da captura inválidos.')
+        analyses = [analyze_hit(self.config.for_sensor(i), data[:, [0, 1, i+2]]) for i in range(len(self.config.sensors))]
+        analysis = dict(analyses[0])
+        if len(analyses) > 1:
+            analysis['issues'] = [f"{s['name']}: {issue}" for s, a in zip(self.config.sensors, analyses) for issue in a['issues']]
+        arrays = {} if len(analyses) == 1 else dict(accelerations_m_s2=data[:, 2:], responses_A=np.asarray([a['A'] for a in analyses]))
         filename = f'impacto_{uuid.uuid4().hex}.npz'
         np.savez_compressed(self.directory/filename, time=data[:, 0], force_N=data[:, 1],
-                            acceleration_m_s2=data[:, 2], F=analysis['F'], A=analysis['A'])
+                            acceleration_m_s2=data[:, 2], F=analysis['F'], A=analysis['A'], **arrays)
         record = {'point': point, 'file': filename, 'status': 'pendente',
                   'trigger': {'threshold_N': self.config.threshold, 'polarity': self.config.polarity,
                               'double_hit_gap_s': self.config.double_hit_gap},
                   **{key: analysis[key] for key in ('peak_N', 'snr_dB', 'tail_ratio', 'issues')}}
+        record['sensors'] = {s['name']: {k: a[k] for k in ('tail_ratio', 'issues')} for s, a in zip(self.config.sensors, analyses)}
         self.records.append(record)
         self.save_manifest()
         return record, analysis
 
-    def hits(self, point):
+    def hits(self, point, sensor=0):
+        if not 0 <= sensor < len(self.config.sensors):
+            raise ValueError('Acelerômetro desconhecido.')
         hits = []
         for record in self.records:
             if record['point'] == point and record['status'] == 'aceita':
                 with np.load(self.directory/record['file']) as data:
-                    hits.append({'F': data['F'], 'A': data['A']})
+                    hits.append({'F': data['F'], 'A': data['A'] if sensor == 0 else data['responses_A'][sensor]})
         return hits
 
     def review(self, record, accept):
         previous = record['status']
         record['status'] = 'aceita' if accept else 'rejeitada'
         try:
-            freq, h1, coherence = ensemble(self.config, self.hits(record['point']))
+            spectra = [ensemble(self.config, self.hits(record['point'], i)) for i in range(len(self.config.sensors))]
             self.save_manifest()
         except Exception:
             record['status'] = previous
             raise
         # Filenames use numeric indices, never user-supplied point names.
         index = [p[0] for p in self.config.points].index(record['point']) + 1
-        np.savetxt(self.directory/f'frf_ponto_{index}.csv',
-                   np.column_stack([freq, h1.real, h1.imag, abs(h1), np.angle(h1, deg=True), coherence]),
-                   delimiter=';', header='Hz;H1_real_m_s2_N;H1_imag_m_s2_N;H1_modulo_m_s2_N;fase_graus;coerencia', comments='')
+        for i, (freq, h1, coherence) in enumerate(spectra):
+            suffix = '' if i == 0 else f'_acelerometro_{i+1}'
+            np.savetxt(self.directory/f'frf_ponto_{index}{suffix}.csv',
+                       np.column_stack([freq, h1.real, h1.imag, abs(h1), np.angle(h1, deg=True), coherence]),
+                       delimiter=';', header='Hz;H1_real_m_s2_N;H1_imag_m_s2_N;H1_modulo_m_s2_N;fase_graus;coerencia', comments='')

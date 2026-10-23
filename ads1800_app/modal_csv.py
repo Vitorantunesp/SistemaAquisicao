@@ -105,6 +105,8 @@ def candidate_impacts(recording, config, start_time, end_time):
 
 
 def import_interval(recording, config, directory, point, start_time, end_time):
+    if config.additional_accelerometers:
+        raise ValueError('Este CSV contém apenas um acelerômetro. Remova os adicionais da configuração para importar; não há canais adicionais no arquivo.')
     if point not in [p[0] for p in config.points]:
         raise ValueError('Associe explicitamente o trecho a um ponto da geometria.')
     captures = candidate_impacts(recording, config, start_time, end_time)

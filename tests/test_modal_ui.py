@@ -12,6 +12,48 @@ from ads1800_app.modal import ModalConfig, ModalSession, ImpactCapture
 
 
 class ModalUiTests(unittest.TestCase):
+    def test_multiple_accelerometers_live_selector_saved_and_exported(self):
+        window = ModalApp()
+        errors = []
+        window.error = errors.append
+        try:
+            window.connect_device()
+            self.wait(lambda: not window.busy)
+            window.fields['duration'].setValue(.5)
+            # Noncontiguous hardware channels must follow the configured sensor order.
+            window.extra_sensors.setPlainText('A2; 4; 0.8; 0.25; 2\nA3; 3; 0.2; 0.25; 1')
+            with tempfile.TemporaryDirectory() as folder:
+                with patch('ads1800_app.ui.modal.QFileDialog.getExistingDirectory', return_value=folder):
+                    window.start()
+                self.wait(lambda: not window.busy)
+                window.arm()
+                self.wait(lambda: window.pending is not None)
+                record = window.pending
+                with np.load(window.session.directory/record['file']) as saved:
+                    self.assertEqual(saved['accelerations_m_s2'].shape, (window.session.config.n, 3))
+                    np.testing.assert_allclose(saved['accelerations_m_s2'][:, 0], saved['acceleration_m_s2'])
+                window.sensor.setCurrentIndex(1)
+                self.assertEqual(window.sensor.currentText(), 'A2')
+                window.review(True)
+                self.assertTrue(window.capture.armed)
+                window.stop()
+                self.wait(lambda: not window.busy)
+                window.sensor.setCurrentIndex(2)
+                self.assertTrue(np.isfinite(window.plots['frf'].values).any())
+                window.post.reference.setCurrentIndex(2)
+                self.assertEqual(window.post.view.config.accelerometer, [.2, .25])
+                csv = Path(folder)/'signals.csv'
+                with patch('ads1800_app.ui.modal.QFileDialog.getSaveFileName', return_value=(str(csv), '')):
+                    window.export_hit()
+                self.assertEqual(np.loadtxt(csv, delimiter=';', skiprows=1).shape[1], 9)
+                window.adopt_session(ModalSession.load(window.session.directory))
+                self.assertEqual(window.sensor.count(), 3)
+                self.assertEqual(window.post.reference.count(), 3)
+                self.assertFalse(errors, errors)
+        finally:
+            window.close()
+            self.wait(lambda: window.backend is None)
+
     def test_ready_beep_adjustment_and_exit_with_missing_session_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             c = ModalConfig(sample_rate=1000, bandpass_enabled=False, duration=.2, pretrigger=.02, force_width=.01)

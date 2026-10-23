@@ -39,7 +39,7 @@ class Geometry(QWidget):
         p.fillRect(self.rect(), QColor('#f8fafc'))
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         c = self.config
-        xy = np.asarray([*c.outline, *[v[1:] for v in c.points], c.accelerometer], float)
+        xy = np.asarray([*c.outline, *[v[1:] for v in c.points], *[s['position'] for s in c.sensors]], float)
         low, high = xy.min(axis=0), xy.max(axis=0)
         span = np.maximum(high-low, 1e-6)
         scale = min((self.width()-70)/span[0], (self.height()-65)/span[1])
@@ -53,11 +53,12 @@ class Geometry(QWidget):
             p.setBrush(QColor('#f97316' if name == self.selected else '#2563eb'))
             p.drawEllipse(point, 5, 5)
             p.drawText(point+QPointF(7, -7), name)
-        point = pos(c.accelerometer)
-        p.setPen(QPen(QColor('#16a34a'), 3))
-        p.drawLine(point+QPointF(-7, -7), point+QPointF(7, 7))
-        p.drawLine(point+QPointF(-7, 7), point+QPointF(7, -7))
-        p.drawText(point+QPointF(9, 17), 'A fixo')
+        for sensor in c.sensors:
+            point = pos(sensor['position'])
+            p.setPen(QPen(QColor('#16a34a'), 3))
+            p.drawLine(point+QPointF(-7, -7), point+QPointF(7, 7))
+            p.drawLine(point+QPointF(-7, 7), point+QPointF(7, -7))
+            p.drawText(point+QPointF(9, 17), sensor['name']+' fixo')
         p.drawText(8, 17, 'Plano XY [m] · força e aceleração em +Z')
 
 
@@ -169,6 +170,10 @@ class ModalApp(QMainWindow):
         self.ax, self.ay = self.number(.5, -1e6, 1e6), self.number(.25, -1e6, 1e6)
         shape.addRow('Acelerômetro fixo — X [m]', self.ax)
         shape.addRow('Acelerômetro fixo — Y [m]', self.ay)
+        self.extra_sensors = QTextEdit()
+        self.extra_sensors.setMaximumHeight(110)
+        self.extra_sensors.setPlaceholderText('A2; 3; 0.8; 0.25; 1\nA3; 4; 0.2; 0.25; 9.80665')
+        shape.addRow('Acelerômetros adicionais: nome; CH (1…); X; Y [m]; fator SI', self.extra_sensors)
         self.preview = Geometry()
         shape.addRow(self.preview)
         self.button('Atualizar desenho', self.preview_geometry, shape)
@@ -209,6 +214,11 @@ class ModalApp(QMainWindow):
         self.frf_view = QComboBox()
         self.frf_view.addItems(FRF_VIEWS)
         frf_row.addWidget(self.frf_view)
+        frf_row.addWidget(QLabel('Acelerômetro:'))
+        self.sensor = QComboBox()
+        self.sensor.addItem('A1')
+        self.sensor.currentIndexChanged.connect(self.sensor_changed)
+        frf_row.addWidget(self.sensor)
         frf_row.addStretch()
         self.trigger_button = self.button('Configurar trigger…', self.configure_trigger, frf_row)
         self.leave_button = self.button('Sair do ensaio', self.leave_session, frf_row)
@@ -324,12 +334,26 @@ class ModalApp(QMainWindow):
                         outline=rows(self.outline), points=rows(self.points, True), accelerometer=[self.ax.value(), self.ay.value()],
                         force_channel=self.force_channel.currentData() if self.force_channel.count() else 0,
                         response_channel=self.response_channel.currentData() if self.response_channel.count() else 1)
+        for line in self.extra_sensors.toPlainText().splitlines():
+            if not line.strip():
+                continue
+            items = [v.strip() for v in line.split(';')]
+            if len(items) != 5:
+                raise ValueError('Acelerômetros adicionais: nome; CH; X; Y; fator SI, um por linha.')
+            c.additional_accelerometers.append(dict(name=items[0], channel=int(items[1])-1,
+                position=[float(v.replace(',', '.')) for v in items[2:4]], factor=float(items[4].replace(',', '.')), limits=None))
         if require_channels:
             by_id = {ch.number: ch for ch in self.channels}
+            if any(s['channel'] not in by_id for s in c.sensors) or c.force_channel not in by_id:
+                raise ValueError('Um dos canais configurados não está disponível no equipamento.')
             for key, factor in [('force', c.force_factor), ('response', c.response_factor)]:
                 ch = by_id[getattr(c, key+'_channel')]
                 if ch.engineering_min is not None and ch.engineering_max is not None:
                     setattr(c, key+'_limits', sorted([ch.engineering_min*factor, ch.engineering_max*factor]))
+            for sensor in c.additional_accelerometers:
+                ch = by_id[sensor['channel']]
+                if ch.engineering_min is not None and ch.engineering_max is not None:
+                    sensor['limits'] = sorted([ch.engineering_min*sensor['factor'], ch.engineering_max*sensor['factor']])
         c.validate()
         return c
 
@@ -361,6 +385,8 @@ class ModalApp(QMainWindow):
         try:
             c = ModalConfig.from_dict(json.loads(Path(path).read_text(encoding='utf-8')))
             c.validate()
+            if any(s['channel'] not in [ch.number for ch in self.channels] for s in c.sensors):
+                raise ValueError('Canal de acelerômetro não disponível neste equipamento.')
             if self.rate.findText(f'{c.sample_rate:g}') < 0:
                 raise ValueError('Taxa da configuração não disponível; conecte ao equipamento correspondente.')
             if any(combo.findData(channel) < 0 for combo, channel in [(self.force_channel, c.force_channel), (self.response_channel, c.response_channel)]):
@@ -377,6 +403,7 @@ class ModalApp(QMainWindow):
             self.points.setPlainText('\n'.join('; '.join(map(str, row)) for row in c.points))
             self.ax.setValue(c.accelerometer[0])
             self.ay.setValue(c.accelerometer[1])
+            self.extra_sensors.setPlainText('\n'.join(f"{s['name']}; {s['channel']+1}; {s['position'][0]}; {s['position'][1]}; {s['factor']}" for s in c.additional_accelerometers))
             for combo, channel in [(self.force_channel, c.force_channel), (self.response_channel, c.response_channel)]:
                 if combo.findData(channel) >= 0:
                     combo.setCurrentIndex(combo.findData(channel))
@@ -403,6 +430,7 @@ class ModalApp(QMainWindow):
         self.capture = None
         self.pending = None
         self.session = session
+        self.set_sensors(session.config)
         self.post.set_session(session)
         self.point.clear()
         self.point.addItems([p[0] for p in session.config.points])
@@ -423,17 +451,19 @@ class ModalApp(QMainWindow):
             directory = QFileDialog.getExistingDirectory(self, 'Pasta para o novo ensaio')
             if not directory:
                 return
-            selected = [replace(ch, enabled=True) for ch in self.channels if ch.number in (c.force_channel, c.response_channel)]
+            channel_ids = [c.force_channel, *[s['channel'] for s in c.sensors]]
+            selected = [replace(ch, enabled=True) for ch in self.channels if ch.number in channel_ids]
             config = ExperimentConfig(name='Ensaio modal', device_ip=self.ip.text(), sample_rate=c.sample_rate, channels=selected)
             path = Path(directory)/f'modal_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}'
             self.session = ModalSession(path, c, {'mode': self.mode.currentText(), 'device_ip': self.ip.text(),
                                                  'channels': [asdict(ch) for ch in selected]})
             self.post.set_session(self.session)
+            self.set_sensors(c)
             self.capture = ImpactCapture(c)
-            self.indices = ([ch.number for ch in selected].index(c.force_channel), [ch.number for ch in selected].index(c.response_channel))
+            self.indices = [ [ch.number for ch in selected].index(number) for number in channel_ids ]
             self.pending = None
-            self.live = DisplayBuffer(2)
-            self.live_filter = StreamingBandpass(c.sample_rate, c.low_cut, c.high_cut, 2) if c.bandpass_enabled else None
+            self.live = DisplayBuffer(len(channel_ids))
+            self.live_filter = StreamingBandpass(c.sample_rate, c.low_cut, c.high_cut, len(channel_ids)) if c.bandpass_enabled else None
             self.history.setRowCount(0)
             for canvas in self.plots.values():
                 canvas.times, canvas.values = np.array([]), np.array([])
@@ -580,18 +610,20 @@ class ModalApp(QMainWindow):
 
     def show_hit(self, record):
         c = self.session.config
+        sensor = max(0, self.sensor.currentIndex())
         with np.load(self.session.directory/record['file']) as d:
             t = (np.arange(c.n)-c.pre)/c.sample_rate
-            force, acceleration = processed_signals(c, d['force_N'], d['acceleration_m_s2']) if c.bandpass_enabled else (d['force_N'], d['acceleration_m_s2'])
+            raw_a = d['acceleration_m_s2'] if sensor == 0 else d['accelerations_m_s2'][:, sensor]
+            force, acceleration = processed_signals(c, d['force_N'], raw_a) if c.bandpass_enabled else (d['force_N'], raw_a)
             self.plot('force', t, force)
             self.plot('acceleration', t, acceleration)
             freq = np.fft.rfftfreq(c.n, 1/c.sample_rate)
-            for key, spectrum in [('fft_force', d['F']), ('fft_acceleration', d['A'])]:
+            for key, spectrum in [('fft_force', d['F']), ('fft_acceleration', d['A'] if sensor == 0 else d['responses_A'][sensor])]:
                 amplitude = abs(spectrum)/c.n
                 amplitude[1:-1 if c.n % 2 == 0 else None] *= 2
                 self.plot(key, freq, amplitude)
         self.quality.setText(f"{record['point']} · {record['status']}\nPico: {record['peak_N']:.3g} N | S/R: {record['snr_dB']:.1f} dB\n"
-                            f"RMS final / pós-trigger: {record['tail_ratio']:.1%}\n"+
+                            f"{c.sensors[sensor]['name']} · RMS final / pós-trigger: {record.get('sensors', {}).get(c.sensors[sensor]['name'], record)['tail_ratio']:.1%}\n"+
                             ('\n'.join(record['issues']) or 'Sem alertas nos critérios automáticos.')+
                             '\nCritérios são indicativos; a aceitação é manual.')
 
@@ -600,7 +632,7 @@ class ModalApp(QMainWindow):
             return
         point = self.point.currentText()
         try:
-            hits = self.session.hits(point)
+            hits = self.session.hits(point, max(0, self.sensor.currentIndex()))
         except OSError:
             self.status.setText('Arquivos do ensaio indisponíveis. Use Sair do ensaio para continuar.')
             return
@@ -617,6 +649,23 @@ class ModalApp(QMainWindow):
         self.geometry.selected = self.point.currentText()
         self.geometry.update()
         self.results()
+
+    def set_sensors(self, config):
+        self.sensor.blockSignals(True)
+        self.sensor.clear()
+        self.sensor.addItems([s['name'] for s in config.sensors])
+        self.sensor.blockSignals(False)
+
+    def sensor_changed(self, *_):
+        if not self.session:
+            return
+        self.results()
+        if self.session.records and not (self.capture and self.capture.armed):
+            record = self.pending if self.pending is not None else self.session.records[max(0, self.history.currentRow())]
+            try:
+                self.show_hit(record)
+            except OSError:
+                self.status.setText('Captura indisponível; use Sair do ensaio.')
 
     def update_history(self):
         self.history.setRowCount(len(self.session.records))
@@ -669,6 +718,13 @@ class ModalApp(QMainWindow):
                     if self.session.config.bandpass_enabled:
                         columns.extend(processed_signals(self.session.config, d['force_N'], d['acceleration_m_s2']))
                         header += ';forca_filtrada_N;aceleracao_filtrada_m_s2'
+                    for i, sensor in enumerate(self.session.config.sensors[1:], 1):
+                        raw = d['accelerations_m_s2'][:, i]
+                        columns.append(raw)
+                        header += f';{sensor["name"]}_original_m_s2'
+                        if self.session.config.bandpass_enabled:
+                            columns.append(processed_signals(self.session.config, d['force_N'], raw)[1])
+                            header += f';{sensor["name"]}_filtrada_m_s2'
                     np.savetxt(path, np.column_stack(columns), delimiter=';', header=header, comments='')
             except Exception as exc:
                 self.error(exc)
@@ -693,7 +749,8 @@ class ModalApp(QMainWindow):
                     c = self.capture.config
                     times = event[1]
                     force = np.asarray(event[2][self.indices[0]])*c.force_factor
-                    acceleration = np.asarray(event[2][self.indices[1]])*c.response_factor
+                    responses = [np.asarray(event[2][index])*sensor['factor'] for index, sensor in zip(self.indices[1:], c.sensors)]
+                    acceleration = np.column_stack(responses)
                     lost = self.backend.samples_lost()
                     if lost > self.lost:
                         self.capture.cancel()
@@ -701,7 +758,7 @@ class ModalApp(QMainWindow):
                             self.live_filter.reset()
                         self.status.setText('Perda de amostras: batida cancelada; rearme o trigger.')
                     self.lost = lost
-                    display_values = self.live_filter.apply([force, acceleration]) if self.live_filter else [force, acceleration]
+                    display_values = self.live_filter.apply([force, *responses]) if self.live_filter else [force, *responses]
                     self.live.append(times, display_values)
                     result = self.capture.feed(times, force, acceleration)
                     self.announce_ready()
@@ -726,7 +783,7 @@ class ModalApp(QMainWindow):
             times, values = self.live.snapshot()
             if len(times):
                 self.plot('force', times-times[-1], values[0])
-                self.plot('acceleration', times-times[-1], values[1])
+                self.plot('acceleration', times-times[-1], values[1+max(0, self.sensor.currentIndex())])
         self.refresh()
 
     def refresh(self):
@@ -746,6 +803,7 @@ class ModalApp(QMainWindow):
         self.trigger_button.setEnabled(running and not armed and self.pending is None and not self.busy)
         self.leave_button.setEnabled(self.session is not None and not self.busy)
         self.point.setEnabled(not armed and self.pending is None and not self.busy)
+        self.sensor.setEnabled(self.session is not None and not self.busy)
         self.accept_button.setEnabled(self.pending is not None and not self.busy)
         self.reject_button.setEnabled(self.pending is not None and not self.busy)
         self.post.refresh(running, self.busy)
