@@ -41,6 +41,12 @@ class MultipleAccelerometersTests(unittest.TestCase):
                 modal = prepare_data(restored, PostSettings(fmin=10, fmax=300), sensor)
                 np.testing.assert_allclose(modal.frfs[np.isfinite(modal.frfs)], gain)
                 self.assertEqual(modal.source_records[0]['accelerometer'], f'A{sensor+1}')
+            for _ in range(2):
+                second, _ = restored.capture('P2', data)
+                restored.review(second, True)
+            joint = prepare_data(restored, PostSettings(fmin=10, fmax=300), None)
+            self.assertEqual(joint.frf_pairs, [('A1', 'P1'), ('A1', 'P2'), ('A2', 'P1'), ('A2', 'P2')])
+            self.assertEqual(joint.frfs.shape[0], 4)
             self.assertTrue((session.directory/'frf_ponto_1_acelerometro_2.csv').exists())
             # Rejecting the shared hit removes it from every response ensemble.
             restored.review(restored.records[0], False)

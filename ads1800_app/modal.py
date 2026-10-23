@@ -2,6 +2,7 @@
 from dataclasses import asdict, dataclass, field, replace
 from collections import deque
 from pathlib import Path
+from datetime import datetime
 import json
 import math
 import uuid
@@ -37,6 +38,7 @@ class ModalConfig:
     points: list = field(default_factory=lambda: [['P1', .1, .25], ['P2', .5, .25], ['P3', .9, .25]])
     accelerometer: list = field(default_factory=lambda: [.5, .25])
     additional_accelerometers: list = field(default_factory=list)
+    ambient_temperature_c: float | None = None
 
     @property
     def sensors(self):
@@ -57,6 +59,8 @@ class ModalConfig:
         return round(self.pretrigger * self.sample_rate)
 
     def validate(self):
+        if self.ambient_temperature_c is not None and (not math.isfinite(self.ambient_temperature_c) or self.ambient_temperature_c < -273.15):
+            raise ValueError('Temperatura ambiente deve ser finita, em °C, e não inferior ao zero absoluto.')
         numbers = [self.sample_rate, self.duration, self.pretrigger, self.threshold,
                    self.force_width, self.exponential_end, self.force_factor, self.response_factor, self.double_hit_gap]
         if not all(math.isfinite(x) for x in numbers):
@@ -271,6 +275,14 @@ def analyze_hit(c, data):
             'peak_N': peak, 'snr_dB': snr, 'tail_ratio': decay, 'issues': issues}
 
 
+def acceleration_psd(c, spectrum):
+    """One-sided window-energy normalized periodogram, (m/s²)²/Hz."""
+    _, window = windows(c)
+    density = abs(np.asarray(spectrum))**2/(c.sample_rate*np.sum(window**2))
+    density[1:-1 if c.n % 2 == 0 else None] *= 2
+    return density
+
+
 def spectral_densities(c, hits):
     """One-sided densities of the windowed records, per Hz (no window gain correction).
 
@@ -310,7 +322,8 @@ class ModalSession:
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=False)
         self.records = []
-        self.metadata = acquisition_metadata or {}
+        self.metadata = dict(acquisition_metadata or {})
+        self.metadata.setdefault('session_created_at', datetime.now().astimezone().isoformat(timespec='seconds'))
         self.save_manifest()
 
     @classmethod

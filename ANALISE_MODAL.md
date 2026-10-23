@@ -6,6 +6,11 @@ continuam disponíveis para os programas anteriores.
 
 ## Uso
 
+Na configuração inicial, informe **Temperatura ambiente no início [°C]**, se
+medida. O campo é opcional: vazio significa não informado, sem assumir uma
+temperatura padrão. A temperatura fica salva com o ensaio e a configuração.
+O horário de início da aquisição é registrado com data, hora e fuso local.
+
 1. Conecte ao **Simulador modal** ou ao **ADS 1800 real**. No equipamento, configure
    previamente sensores, unidades, faixas e condicionamento no Assistente LYNX.
 2. Selecione canais distintos para martelo e acelerômetro. Os valores do equipamento
@@ -26,7 +31,7 @@ continuam disponíveis para os programas anteriores.
    pré-trigger e observar força abaixo de 50% do limiar, o próximo cruzamento
    dispara uma captura. Um aviso sonoro e a mensagem **Pronto** indicam quando
    o operador pode bater. Há polaridade absoluta, positiva ou negativa.
-7. Confira os sinais, FFTs e alertas. **Aceitar batida** inclui a captura nas médias
+7. Confira os sinais, FFT da força, PSD da aceleração e alertas. **Aceitar batida** inclui a captura nas médias
    daquele ponto; **Rejeitar batida** preserva os dados, mas os exclui das médias.
    Ao aceitar, o trigger é rearmado automaticamente se a aquisição continuar ativa;
    aguarde novamente o aviso sonoro. Rejeitar não rearma automaticamente.
@@ -103,6 +108,12 @@ Referência para escolha das janelas: [NI — Understanding FFTs and Windowing](
 - FFT unilateral de amplitude: `|FFT|/N`, duplicando os bins internos, sem duplicar
   DC ou Nyquist. Não há correção de ganho coerente das janelas. Para transitórios,
   as amplitudes dependem do comprimento do registro e da janela; não são PSD.
+  Na aquisição, essa visualização permanece para a força. Para a aceleração,
+  o gráfico mostra a **PSD da batida selecionada** em `(m/s²)²/Hz`, calculada como
+  `|A|² / (fs · soma(w_a²))`, duplicando apenas os bins internos. A janela de
+  resposta e o filtro configurados são respeitados. É um periodograma por batida,
+  não uma média de Welch; para transitórios o resultado depende da duração e da janela.
+  Referência de normalização: [SciPy — periodogram](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.periodogram.html).
 - Alertas: contatos de mesma polaridade acima de 20% do pico ou seis desvios
   do ruído (o maior), separados por pelo menos 2 ms abaixo de 5% do pico ou três
   desvios do ruído (o maior). O intervalo é ajustável; pequenas interrupções e
@@ -188,13 +199,34 @@ O desenho identifica as posições de todos eles.
 Um único trigger captura força e todas as acelerações simultaneamente, com os
 mesmos tempos e janelas. A aceitação/rejeição vale para a batida completa. Os
 alertas identificam o sensor, e a lista **Acelerômetro** alterna o sinal temporal,
-FFT, FRF e coerência exibidos. Os demais canais continuam sendo gravados.
+PSD, FRF e coerência exibidos. Os demais canais continuam sendo gravados.
 
-No pós-processamento, escolha o **Acelerômetro de referência para a identificação**
-e calcule. Cada cálculo usa as FRFs dos pontos de impacto para essa referência;
-não há ajuste conjunto de várias referências nesta versão. Trocar a referência
-invalida os modos anteriores para evitar misturar resultados. Exporte cada
-resultado antes de trocar, se desejar conservá-lo; o relatório registra a referência.
+No pós-processamento, escolha **MISO — acelerômetro selecionado** ou
+**MIMO — todos os acelerômetros**. MISO usa as FRFs dos pontos de impacto para
+o acelerômetro escolhido. MIMO exige ao menos dois acelerômetros e dois pontos
+com batidas suficientes e usa conjuntamente todos os pares saída–entrada.
+Os impactos continuam sequenciais (roving hammer): não há vários martelos simultâneos.
+Trocar o método ou a referência invalida o resultado exibido. Exporte antes
+de trocar, se desejar conservar o ajuste.
+
+O ajuste MIMO usa o LSCF do sdypy-EMA com denominador comum a todas as FRFs
+da matriz, seguido de LSFD por par. Para cada modo simples, monta-se a matriz
+de resíduos (acelerômetros × impactos) e aplica-se SVD para separar as formas
+de entrada e de saída. Isso evita concatenar formas normalizadas de referências
+distintas. A animação mostra a forma nos pontos de impacto; a tabela também
+apresenta as componentes nos acelerômetros, em escala própria. As duas formas
+são normalizadas separadamente e não possuem escala de massa comum.
+
+O seletor de comparação apresenta pares como `A2 ← P3`. O relatório contém
+o mapeamento dos pares, constantes modais, valores singulares, erro da aproximação
+de posto 1, formas e FRFs reconstruídas. `formas_modais.csv` usa pontos de impacto;
+`formas_acelerometros.csv` contém as formas de saída. Erro de posto 1 acima de
+10% gera alerta. Esse método global pressupõe modos simples; não é uma implementação
+de PolyMAX/p-LSCF matricial e não garante separar modos exatamente repetidos.
+O modo MIMO usa exclusivamente sdypy-EMA; o motor anterior permanece disponível
+em MISO. Se alguma FRF for excluída por qualidade/lacunas, o cálculo MIMO solicita
+revisão da faixa/coerência para preservar uma matriz completa, sem preencher dados
+faltantes com zero. MISO continua disponível para trabalhar com uma referência.
 
 Ensaios antigos com um acelerômetro continuam compatíveis. Ensaios com vários
 sensores usam o formato de sessão 2 e incluem nos NPZ `accelerations_m_s2`
@@ -326,6 +358,33 @@ manuais e compare o ajuste das FRFs. O ajuste atual restringe ζ entre 0,001% e 
 São sinalizados amortecimento no limite, largura modal menor que dois bins,
 frequência no limite de um candidato, mau condicionamento e erro de ajuste acima
 de 20%. Os parâmetros continuam sendo estimativas que precisam de avaliação.
+
+## Relatório do ensaio
+
+Após calcular e selecionar os modos, use **Gerar relatório…** no pós-processamento.
+Escolha onde salvar o arquivo HTML. Ele contém as figuras incorporadas e pode ser
+aberto offline em um navegador, compartilhado como um único arquivo e impresso
+em PDF pelo comando de impressão do navegador.
+
+O relatório inclui dados e configurações do ensaio, data/hora de execução com
+fuso, data de geração, temperatura ambiente, contorno, canais e coordenadas dos
+acelerômetros e impactos. Informa frequências naturais, amortecidas e amortecimentos,
+coerências mínimas/médias por FRF e valores nos bins próximos de cada modo,
+curvas de coerência, figuras dos modos e tabelas XY/Z real/Z imaginário/|Z|.
+No MIMO, as componentes nos acelerômetros aparecem em uma tabela de saída com
+escala própria. Também lista as capturas usadas e os alertas do ajuste.
+
+As figuras modais mostram a parte real em fase 0°, sem interpolar pontos não
+medidos. Z modal é adimensional, sem normalização por massa; não é deslocamento
+em metros. A identificação das batidas utilizadas torna o relatório rastreável.
+O botão fica desabilitado enquanto o cálculo está desatualizado ou não há modos.
+
+O horário de execução é registrado nos novos ensaios ao iniciar a aquisição.
+Sessões antigas/importadas sem esse registro mostram **Não informado**; o horário
+de criação/importação da pasta ou geração do relatório não é usado como substituto.
+Temperatura não medida permanece **Não informado**, e coerência indisponível
+permanece **Não disponível**. O HTML é uma cópia dos resultados no instante da
+exportação; alterações posteriores exigem gerar outro relatório.
 
 ## Importação de ensaios CSV históricos
 

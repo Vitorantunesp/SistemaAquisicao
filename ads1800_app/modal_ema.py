@@ -39,6 +39,34 @@ def _constants(model, selection):
         return model.get_constants(method='lsfd', f_lower=model.lower, f_upper=model.freq[-1])
 
 
+def modal_shapes(values, data, active):
+    """Factor a simple-mode residue matrix R = output_shape * input_shape.T.
+
+    Do not concatenate independently normalized references: the rank-one SVD
+    preserves relative phases across every input and every output.
+    """
+    names = [data.point_ids[i] for i in active]
+    if not data.frf_pairs:
+        real, imag = _shape(values, names)
+        return dict(shape=real, shape_imag=imag)
+    pairs = [data.frf_pairs[i] for i in active]
+    outputs = list(dict.fromkeys(a for a, _ in pairs))
+    inputs = list(dict.fromkeys(p for _, p in pairs))
+    if len(outputs) < 2 or len(inputs) < 2 or len(pairs) != len(outputs)*len(inputs):
+        raise ValueError('Matriz MIMO incompleta após seleção das FRFs; revise faixa e coerência.')
+    matrix = np.empty((len(outputs), len(inputs)), complex)
+    for value, (a, p) in zip(values, pairs):
+        matrix[outputs.index(a), inputs.index(p)] = value
+    u, singular, vh = np.linalg.svd(matrix, full_matrices=False)
+    if singular[0] < 1e-30:
+        raise ValueError('Modo com matriz de resíduos nula.')
+    real, imag = _shape(vh[0], inputs)
+    output_real, output_imag = _shape(u[:, 0], outputs)
+    error = float(np.linalg.norm(singular[1:])/np.linalg.norm(singular))
+    return dict(shape=real, shape_imag=imag, output_shape=output_real, output_shape_imag=output_imag,
+                residue_rank_one_error=error, residue_singular_values=singular.tolist())
+
+
 def identify_ema(data, settings, seeds=None, order=20, stability=None):
     """Identify all orders, reconstruct provisional shapes and select repeated poles.
 
@@ -84,6 +112,8 @@ def identify_ema(data, settings, seeds=None, order=20, stability=None):
         active.append(i)
     if not active:
         raise ValueError('Nenhuma FRF adequada ao LSCF. Confira faixa, coerência e repetição das batidas.')
+    if data.frf_pairs and len(active) != len(data.point_ids):
+        raise ValueError('MIMO: uma ou mais FRFs foram excluídas. Ajuste a faixa/coerência para obter uma matriz completa, ou use MISO.')
     names = [data.point_ids[i] for i in active]
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
@@ -119,7 +149,7 @@ def identify_ema(data, settings, seeds=None, order=20, stability=None):
             try:
                 _, constants = _constants(model, selected)
                 for j, mode in enumerate(modes):
-                    mode['shape'], mode['shape_imag'] = _shape(constants[:, j], names)
+                    mode.update(modal_shapes(constants[:, j], data, active))
                 modes = classify_stability(modes, previous, stability)
                 row['modes'] = modes
             except (ValueError, np.linalg.LinAlgError) as exc:
@@ -170,6 +200,8 @@ def _base_result(context, modes, fitted, selection):
         errors[data.point_ids[i]] = float(np.linalg.norm((fitted[j]-data.frfs[i, :size])[mask])/
                                          max(np.linalg.norm(data.frfs[i, :size][mask]), 1e-30)) if mask.any() else None
     notes = list(context['notes'])
+    if data.frf_pairs:
+        notes.append('MIMO roving hammer: polos comuns a todas as FRFs; formas por SVD dos resíduos. Hipótese de modos simples; modos repetidos podem não ser separados.')
     if not modes:
         notes.append('Nenhum modo selecionado automaticamente. Selecione polos no diagrama e aplique a seleção.')
     elif any(v is not None and v > .2 for v in errors.values()):
@@ -183,6 +215,9 @@ def _base_result(context, modes, fitted, selection):
             'warnings': notes, 'source_records': data.source_records, 'frequency': model.freq,
             'measured': data.frfs[active, :size], 'coherence': data.coherence[active, :size],
             'fitted': fitted, 'stabilization': context['diagram'], 'selected_poles': selection,
+            'identification': 'MIMO' if data.frf_pairs else 'MISO',
+            'frf_pairs': [dict(output=a, input=p) for a, p in data.frf_pairs],
+            'shape_point_ids': list(dict.fromkeys(p for _, p in data.frf_pairs)) if data.frf_pairs else [data.point_ids[i] for i in active],
             '_ema_context': context}
 
 
@@ -207,10 +242,14 @@ def reconstruct_ema(context, selection):
     modes = []
     for j, key in enumerate(selection):
         mode = dict(allowed[tuple(key)])
-        mode['shape'], mode['shape_imag'] = _shape(constants[:, j], names)
-        normal = EMA.normal_modes.complex_to_normal_mode(constants[:, j]).ravel()
+        mode.update(modal_shapes(constants[:, j], data, context['active']))
+        shape_names = list(mode['shape'])
+        shape = np.array([mode['shape'][p]+1j*mode['shape_imag'][p] for p in shape_names])
+        if mode.get('residue_rank_one_error', 0) > .1:
+            mode['warnings'] = [*mode['warnings'], 'Resíduos pouco compatíveis com um modo simples (erro de posto 1 >10%).']
+        normal = EMA.normal_modes.complex_to_normal_mode(shape).ravel()
         normal /= normal[np.argmax(abs(normal))]
-        mode['normal_shape'] = dict(zip(names, map(float, normal)))
+        mode['normal_shape'] = dict(zip(shape_names, map(float, normal)))
         mode['modal_constants_real'] = dict(zip(names, map(float, constants[:, j].real)))
         mode['modal_constants_imag'] = dict(zip(names, map(float, constants[:, j].imag)))
         modes.append(mode)
@@ -218,5 +257,6 @@ def reconstruct_ema(context, selection):
     with warnings.catch_warnings():
         # sdypy 0.31 stores a mathematically real MAC in a real matrix.
         warnings.filterwarnings('ignore', message='Casting complex values to real discards the imaginary part', category=np.exceptions.ComplexWarning)
-        result['auto_mac'] = np.atleast_2d(EMA.MAC(constants, constants)).tolist()
+        shapes = np.asarray([[m['shape'][p]+1j*m['shape_imag'][p] for p in m['shape']] for m in modes]).T
+        result['auto_mac'] = np.atleast_2d(EMA.MAC(shapes, shapes)).tolist()
     return result

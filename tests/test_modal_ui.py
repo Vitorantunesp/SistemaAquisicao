@@ -20,6 +20,7 @@ class ModalUiTests(unittest.TestCase):
             window.connect_device()
             self.wait(lambda: not window.busy)
             window.fields['duration'].setValue(.5)
+            window.temperature.setText('24,5')
             # Noncontiguous hardware channels must follow the configured sensor order.
             window.extra_sensors.set_sensors([
                 dict(name='A2', channel=3, position=[.8, .25], factor=2),
@@ -135,6 +136,7 @@ class ModalUiTests(unittest.TestCase):
                     window.start()
                 self.wait(lambda: not window.busy)
                 self.assertTrue(window.controller.running)
+                self.assertIn('acquisition_started_at', window.session.metadata)
                 window.arm()
                 self.assertFalse(window.point.isEnabled())
                 self.wait(lambda: window.pending is not None)

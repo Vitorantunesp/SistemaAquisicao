@@ -3,3 +3,4 @@ PyQt6>=6.6,<7
 scipy>=1.11,<2
 PyWavelets>=1.6,<2
 sdypy-EMA==0.31.0
+matplotlib>=3.7,<4

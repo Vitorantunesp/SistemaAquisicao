@@ -4,7 +4,7 @@ H(s) = sum(r_j*s²/(s²+2*zeta_j*wn_j*s+wn_j²)) + c0 + c2*(s/2pi)².
 The same exponential applied to both signals evaluates H at s=alpha+i*w;
 fitting there estimates physical rather than window-broadened damping.
 """
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, replace, field
 import csv
 import json
 from pathlib import Path
@@ -47,10 +47,23 @@ class ModalData:
     alpha: float
     warnings: list
     source_records: list
+    frf_pairs: list = field(default_factory=list)  # (output sensor, input impact point), row order
 
 
 def prepare_data(session, settings, sensor=0):
     """Rebuild only accepted ensembles, using original SI records, not old windows."""
+    if sensor is None:
+        if len(session.config.sensors) < 2:
+            raise ValueError('MIMO requer pelo menos dois acelerômetros. Use MISO para um sensor.')
+        datasets = [prepare_data(session, settings, i) for i in range(len(session.config.sensors))]
+        if len(datasets[0].point_ids) < 2:
+            raise ValueError('MIMO requer pelo menos dois pontos de impacto com batidas aceitas suficientes.')
+        pairs = [(s['name'], point) for s, data in zip(session.config.sensors, datasets) for point in data.point_ids]
+        return ModalData(datasets[0].frequency, np.concatenate([d.frfs for d in datasets]),
+                         np.concatenate([d.coherence for d in datasets]),
+                         [f'{a} ← {p}' for a, p in pairs], sum([d.counts for d in datasets], []),
+                         datasets[0].alpha, list(dict.fromkeys(w for d in datasets for w in d.warnings)),
+                         sum([d.source_records for d in datasets], []), pairs)
     c = session.config.for_sensor(sensor)
     sensor_name = session.config.sensors[sensor]['name']
     settings.validate(c.sample_rate/2)
@@ -248,11 +261,18 @@ def export_results(result, directory):
     with (directory/'formas_modais.csv').open('w', newline='', encoding='utf-8-sig') as stream:
         writer = csv.writer(stream, delimiter=';')
         writer.writerow(['ponto']+[f'modo_{i+1}_Z_{part}' for i in range(len(result['modes'])) for part in ('real', 'imag')])
-        for point in result['point_ids']:
+        for point in result.get('shape_point_ids', result['point_ids']):
             writer.writerow([point]+[v for m in result['modes'] for v in (m['shape'][point], m.get('shape_imag', {}).get(point, 0))])
     np.savez_compressed(directory/'frfs_ajustadas.npz', frequency_Hz=result['frequency'],
                         measured=result['measured'], fitted=result['fitted'], coherence=result['coherence'],
                         point_ids=np.asarray(result['point_ids']))
+    if result.get('identification') == 'MIMO':
+        with (directory/'formas_acelerometros.csv').open('w', newline='', encoding='utf-8-sig') as stream:
+            writer = csv.writer(stream, delimiter=';')
+            writer.writerow(['modo', 'acelerometro', 'Z_real', 'Z_imag', 'erro_residuo_posto_1'])
+            for i, mode in enumerate(result['modes'], 1):
+                for sensor, value in mode['output_shape'].items():
+                    writer.writerow([i, sensor, value, mode['output_shape_imag'][sensor], mode['residue_rank_one_error']])
     if 'stabilization' in result:
         with (directory/'estabilizacao.csv').open('w', newline='', encoding='utf-8-sig') as stream:
             writer = csv.writer(stream, delimiter=';')

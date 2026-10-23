@@ -20,7 +20,7 @@ from ads1800_app.backends.lynx import LynxBackend
 from ads1800_app.backends.modal_simulator import ModalSimulatorBackend
 from ads1800_app.config import ADS1800_SAMPLE_RATES, ExperimentConfig
 from ads1800_app.controller import AcquisitionController
-from ads1800_app.modal import ModalConfig, ImpactCapture, ModalSession, ensemble, processed_signals
+from ads1800_app.modal import ModalConfig, ImpactCapture, ModalSession, ensemble, processed_signals, acceleration_psd
 from ads1800_app.monitor_signal import StreamingBandpass
 from ads1800_app.ui.plots import ChannelCanvas, DisplayBuffer
 from ads1800_app.ui.modal_post import PostPanel
@@ -125,6 +125,9 @@ class ModalApp(QMainWindow):
         grid.addLayout(form, 0, 0)
         self.fields = {}
         c = ModalConfig()
+        self.temperature = QLineEdit()
+        self.temperature.setPlaceholderText('Não medida (opcional)')
+        form.addRow('Temperatura ambiente no início [°C]', self.temperature)
         for key, label, low, high in [
             ('duration', 'Registro total [s]', .01, 600), ('pretrigger', 'Pré-trigger [s]', .001, 60),
             ('threshold', 'Trigger de força [N]', .0001, 1e9), ('force_width', 'Janela de força após trigger [s]', .0001, 60),
@@ -254,7 +257,7 @@ class ModalApp(QMainWindow):
             ('force', 'Força [N] × tempo [s]'), ('frf', 'FRF H1 — módulo [(m/s²)/N] × Hz'),
             ('acceleration', 'Aceleração [m/s²] × tempo [s]'), ('phase', 'FRF H1 — fase [graus] × Hz'),
             ('fft_force', 'FFT da força janelada — amplitude [N] × Hz'), ('coherence', 'Coerência (≥2 batidas aceitas) × Hz'),
-            ('fft_acceleration', 'FFT da aceleração janelada — amplitude [m/s²] × Hz')]):
+            ('fft_acceleration', 'PSD da aceleração — [(m/s²)²/Hz] × Hz')]):
             panel = QWidget()
             box = QVBoxLayout(panel)
             box.setContentsMargins(0, 0, 0, 0)
@@ -336,6 +339,8 @@ class ModalApp(QMainWindow):
                         force_channel=self.force_channel.currentData() if self.force_channel.count() else 0,
                         response_channel=self.response_channel.currentData() if self.response_channel.count() else 1)
         c.additional_accelerometers = self.extra_sensors.sensors()
+        text = self.temperature.text().strip()
+        c.ambient_temperature_c = float(text.replace(',', '.')) if text else None
         if require_channels:
             by_id = {ch.number: ch for ch in self.channels}
             if any(s['channel'] not in by_id for s in c.sensors) or c.force_channel not in by_id:
@@ -397,6 +402,7 @@ class ModalApp(QMainWindow):
             self.points.setPlainText('\n'.join('; '.join(map(str, row)) for row in c.points))
             self.ax.setValue(c.accelerometer[0])
             self.ay.setValue(c.accelerometer[1])
+            self.temperature.setText('' if c.ambient_temperature_c is None else f'{c.ambient_temperature_c:g}')
             self.extra_sensors.set_sensors(c.additional_accelerometers)
             for combo, channel in [(self.force_channel, c.force_channel), (self.response_channel, c.response_channel)]:
                 if combo.findData(channel) >= 0:
@@ -473,6 +479,8 @@ class ModalApp(QMainWindow):
             if isinstance(self.backend, ModalSimulatorBackend):
                 self.backend.period = c.duration+1
             def started(_):
+                self.session.metadata['acquisition_started_at'] = datetime.now().astimezone().isoformat(timespec='seconds')
+                self.session.save_manifest()
                 self.lost = self.backend.samples_lost()
                 self.tabs.setCurrentIndex(1)
                 self.status.setText('Selecione o ponto e arme o trigger. Cada batida aguarda aceitação ou rejeição.')
@@ -615,6 +623,8 @@ class ModalApp(QMainWindow):
             for key, spectrum in [('fft_force', d['F']), ('fft_acceleration', d['A'] if sensor == 0 else d['responses_A'][sensor])]:
                 amplitude = abs(spectrum)/c.n
                 amplitude[1:-1 if c.n % 2 == 0 else None] *= 2
+                if key == 'fft_acceleration':
+                    amplitude = acceleration_psd(c, spectrum)
                 self.plot(key, freq, amplitude)
         self.quality.setText(f"{record['point']} · {record['status']}\nPico: {record['peak_N']:.3g} N | S/R: {record['snr_dB']:.1f} dB\n"
                             f"{c.sensors[sensor]['name']} · RMS final / pós-trigger: {record.get('sensors', {}).get(c.sensors[sensor]['name'], record)['tail_ratio']:.1%}\n"+

@@ -7,7 +7,7 @@ from PyQt6.QtCore import QPointF, Qt, QTimer, QRectF
 from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QDoubleSpinBox, QSpinBox, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
-    QComboBox, QSplitter, QSlider, QTabWidget)
+    QComboBox, QSplitter, QSlider, QTabWidget, QFileDialog)
 
 from ads1800_app.modal_post import PostSettings, StabilitySettings, prepare_data, fit_modes, export_results
 from ads1800_app.modal_ema import identify_ema, reconstruct_ema
@@ -75,7 +75,7 @@ class ModeView(QWidget):
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 'Abra um ensaio e calcule os modos.')
             return
         c = self.config
-        xy = np.asarray([*c.outline, *[v[1:] for v in c.points], c.accelerometer], float)
+        xy = np.asarray([*c.outline, *[v[1:] for v in c.points], *[s['position'] for s in c.sensors]], float)
         center = (xy.min(axis=0)+xy.max(axis=0))/2
         span = max(float(np.ptp(xy, axis=0).max()), 1e-6)
         relative = xy-center
@@ -100,11 +100,12 @@ class ModeView(QWidget):
             p.setBrush(QColor('#94a3b8' if not measured else '#2563eb' if self.shape[name] >= 0 else '#e87916'))
             p.drawEllipse(moving, 5, 5)
             p.drawText(moving+QPointF(8, -8), f'{name}' if measured else f'{name} (sem estimativa)')
-        a = pos(c.accelerometer)
-        p.setPen(QPen(QColor('#16a34a'), 2))
-        p.drawLine(a+QPointF(-6, -6), a+QPointF(6, 6))
-        p.drawLine(a+QPointF(-6, 6), a+QPointF(6, -6))
-        p.drawText(a+QPointF(8, 16), 'Referência A (posição do sensor)')
+        for sensor in c.sensors:
+            a = pos(sensor['position'])
+            p.setPen(QPen(QColor('#16a34a'), 2))
+            p.drawLine(a+QPointF(-6, -6), a+QPointF(6, 6))
+            p.drawLine(a+QPointF(-6, 6), a+QPointF(6, -6))
+            p.drawText(a+QPointF(8, 16), sensor['name']+' (posição do sensor)')
         p.setPen(QColor('#334155'))
         p.drawText(12, 22, self.mode_label)
         p.drawText(12, 42, 'Deslocamento relativo em Z · perspectiva do plano XY')
@@ -179,6 +180,10 @@ class PostPanel(QWidget):
         grid.addLayout(tolerances, 7, 2)
         layout.addWidget(self.controls)
         reference_row = QHBoxLayout()
+        self.identification = QComboBox()
+        self.identification.addItems(['MISO — acelerômetro selecionado', 'MIMO — todos os acelerômetros'])
+        self.identification.currentIndexChanged.connect(self.reference_changed)
+        reference_row.addWidget(self.identification)
         reference_row.addWidget(QLabel('Acelerômetro de referência para a identificação:'))
         self.reference = QComboBox()
         self.reference.addItem('A1')
@@ -192,6 +197,9 @@ class PostPanel(QWidget):
         self.export = QPushButton('Salvar pós-processamento')
         self.export.clicked.connect(self.save)
         row.addWidget(self.export)
+        self.report_button = QPushButton('Gerar relatório…')
+        self.report_button.clicked.connect(self.make_report)
+        row.addWidget(self.report_button)
         layout.addLayout(row)
         self.summary = QLabel('Abra um ensaio ou finalize uma aquisição para calcular os modos.')
         self.summary.setWordWrap(True)
@@ -295,8 +303,13 @@ class PostPanel(QWidget):
         self.invalidate()
 
     def reference_changed(self, *_):
+        mimo = self.identification.currentIndex() == 1
+        self.reference.setEnabled(not mimo)
+        self.engine.setEnabled(not mimo)
+        if mimo:
+            self.engine.setCurrentIndex(0)
         if self.session and self.reference.currentIndex() >= 0:
-            self.view.config = self.session.config.for_sensor(self.reference.currentIndex())
+            self.view.config = self.session.config if mimo else self.session.config.for_sensor(self.reference.currentIndex())
         self.invalidate()
 
     def invalidate(self, *_):
@@ -318,6 +331,7 @@ class PostPanel(QWidget):
                            'Modos com nó na referência fixa podem não ser observados.')
         self.error_label.setText('Módulo da acelerância [(m/s²)/N] × frequência [Hz]')
         self.export.setEnabled(False)
+        self.report_button.setEnabled(False)
 
     def update_markers(self, frequencies):
         for canvas in [self.comparison, self.comparison_secondary, *[self.owner.plots[key] for key in ('fft_force', 'fft_acceleration', 'frf', 'phase', 'coherence')]]:
@@ -341,9 +355,12 @@ class PostPanel(QWidget):
                 self.summary.setText('Cálculo não concluído. Confira a mensagem de erro e revise os parâmetros.')
         allowed = self.session is not None and not running and not busy and self.owner.pending is None
         self.controls.setEnabled(not busy)
-        self.reference.setEnabled(not busy)
+        self.reference.setEnabled(not busy and self.identification.currentIndex() == 0)
+        self.identification.setEnabled(not busy)
+        self.engine.setEnabled(not busy and self.identification.currentIndex() == 0)
         self.calculate.setEnabled(allowed)
         self.export.setEnabled(allowed and self.result is not None)
+        self.report_button.setEnabled(allowed and self.result is not None and bool(self.result['modes']))
         self.apply_poles.setEnabled(allowed and self.result is not None and '_ema_context' in self.result)
         self.stability_canvas.setEnabled(not busy)
 
@@ -361,7 +378,7 @@ class PostPanel(QWidget):
         self.summary.setText('Recalculando FRFs aceitas e ajustando os modos…')
         self.computing = True
         session = self.session
-        sensor = max(0, self.reference.currentIndex())
+        sensor = None if self.identification.currentIndex() == 1 else max(0, self.reference.currentIndex())
         engine = self.engine.currentIndex()
         order = self.polynomial_order.value()
         stability = StabilitySettings(frequency_tolerance=self.stability_fields['frequency_tolerance'].value()/100,
@@ -384,7 +401,7 @@ class PostPanel(QWidget):
         self.point.clear()
         self.point.addItems(result['point_ids'])
         error = max([v for v in result['relative_fit_error'].values() if v is not None], default=0)
-        self.summary.setText(f"{len(result['modes'])} modos estimados · erro máximo da FRF: {error:.1%} · "
+        self.summary.setText(f"{result.get('identification', 'MISO')} · {len(result['modes'])} modos estimados · erro máximo da FRF: {error:.1%} · "
                                f"resolução: {result['frequency_resolution_hz']:.4g} Hz · exponencial considerada no ajuste.")
         if not result['modes']:
             self.summary.setText('Nenhum polo selecionado automaticamente. Revise o diagrama e selecione os modos para reconstruir a FRF.')
@@ -419,6 +436,12 @@ class PostPanel(QWidget):
             self.components.setItem(i, 0, QTableWidgetItem(name))
             self.components.setItem(i, 1, QTableWidgetItem(f"{mode['shape'][name]:+.5f}" if name in mode['shape'] else 'Sem estimativa'))
             self.components.setItem(i, 2, QTableWidgetItem(f"{mode.get('shape_imag', {}).get(name, 0):+.5f}" if name in mode['shape'] else 'Sem estimativa'))
+        for name, value in mode.get('output_shape', {}).items():
+            row = self.components.rowCount()
+            self.components.insertRow(row)
+            self.components.setItem(row, 0, QTableWidgetItem(name+' (saída; escala própria)'))
+            self.components.setItem(row, 1, QTableWidgetItem(f'{value:+.5f}'))
+            self.components.setItem(row, 2, QTableWidgetItem(f"{mode['output_shape_imag'][name]:+.5f}"))
 
     def show_comparison(self, *_):
         if self.result is None or self.point.currentIndex() < 0:
@@ -453,6 +476,20 @@ class PostPanel(QWidget):
         self.view.playing = not self.view.playing
         self.pause.setText('Pausar animação' if self.view.playing else 'Animar modo')
 
+    def make_report(self):
+        if self.owner.busy or self.result is None or not self.result['modes']:
+            return
+        from ads1800_app.modal_report import generate_report
+        default = self.session.directory/f'relatorio_modal_{datetime.now():%Y%m%d_%H%M%S}.html'
+        path, _ = QFileDialog.getSaveFileName(self, 'Salvar relatório modal', str(default), 'Relatório HTML (*.html)')
+        if not path:
+            return
+        identification = 'MIMO' if self.identification.currentIndex() == 1 else 'MISO'
+        reference = self.reference.currentIndex()
+        session, result = self.session, self.result
+        self.owner.work(lambda: generate_report(session, result, path, identification, reference),
+                        lambda output: self.summary.setText(f'Relatório salvo em {output}. Abra no navegador para visualizar ou imprimir em PDF.'))
+
     def save(self):
         if self.result is None:
             return
@@ -461,9 +498,10 @@ class PostPanel(QWidget):
             # Include geometry so exported relative shapes remain self-contained.
             report = dict(self.result, geometry={'outline': self.session.config.outline,
                           'points': self.session.config.points,
-                          'accelerometer': self.session.config.sensors[self.reference.currentIndex()]['position'],
+                          'accelerometer': None if self.identification.currentIndex() == 1 else self.session.config.sensors[self.reference.currentIndex()]['position'],
                           'accelerometers': self.session.config.sensors},
-                          reference_accelerometer=self.session.config.sensors[self.reference.currentIndex()],
+                          identification='MIMO' if self.identification.currentIndex() == 1 else 'MISO',
+                          reference_accelerometer=None if self.identification.currentIndex() == 1 else self.session.config.sensors[self.reference.currentIndex()],
                           bandpass={'enabled': self.session.config.bandpass_enabled,
                                     'low_hz': self.session.config.low_cut, 'high_hz': self.session.config.high_cut,
                                     'method': 'Butterworth SOS causal; protótipo ordem 4; antes do janelamento'})

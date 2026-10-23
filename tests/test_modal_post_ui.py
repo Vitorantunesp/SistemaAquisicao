@@ -48,6 +48,12 @@ class PostUiTests(unittest.TestCase):
                 self.assertEqual(len(window.plots['frf'].frequency_markers), 2)
                 self.assertEqual(len(post.comparison.frequency_markers), 2)
                 self.assertTrue(post.export.isEnabled())
+                self.assertTrue(post.report_button.isEnabled())
+                report_path = Path(folder)/'relatorio.html'
+                with patch('ads1800_app.ui.modal_post.QFileDialog.getSaveFileName', return_value=(str(report_path), '')):
+                    post.make_report()
+                self.wait(lambda: not window.busy)
+                self.assertTrue(report_path.exists())
                 original_result = post.result
                 for mode in range(3):
                     post.frf_view.setCurrentIndex(mode)
@@ -91,6 +97,7 @@ class PostUiTests(unittest.TestCase):
                 self.assertEqual(window.plots['frf'].frequency_markers, [])
                 self.assertIsNone(post.stability_canvas.result)
                 self.assertFalse(post.export.isEnabled())
+                self.assertFalse(post.report_button.isEnabled())
                 post.fields['min_hits'].setValue(100)
                 post.compute()
                 self.wait(lambda: not window.busy)
