@@ -26,6 +26,10 @@ from ads1800_app.ui.plots import ChannelCanvas, DisplayBuffer
 from ads1800_app.ui.modal_post import PostPanel
 from ads1800_app.ui.frf_view import FRF_VIEWS, frf_components
 from ads1800_app.ui.modal_sensors import SensorTable
+from ads1800_app.ui.modal_setup import ModalSetupDialog
+from ads1800_app.ui.modal_navigation import ModalNavigation
+from ads1800_app.ui.modal_configuration import build_settings, populate_channel_info
+from ads1800_app.ui.modal_style import modal_font
 
 
 class Geometry(QWidget):
@@ -66,10 +70,13 @@ class Geometry(QWidget):
 class ModalApp(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setFont(modal_font())
         self.setWindowTitle('Análise modal — Roving hammer | ADS 1800')
         self.resize(1440, 940)
         self.backend = self.controller = self.capture = self.session = None
         self.pending = None
+        self.setup_study = None
+        self.setup_form_signature = None
         self.ready_announced = False
         self.channels = []
         self.busy = False
@@ -77,12 +84,12 @@ class ModalApp(QMainWindow):
         self.live = DisplayBuffer(2)
         self.live_filter = None
         self.lost = 0
-        self.tabs = QTabWidget()
+        self.tabs = ModalNavigation()
         self.setCentralWidget(self.tabs)
         self.make_settings()
         self.make_acquisition()
         self.post = PostPanel(self)
-        self.tabs.addTab(self.post, '3. Pós-processamento modal')
+        self.tabs.addTab(self.post, 'Pós-processamento')
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.process)
         self.timer.start(40)
@@ -102,102 +109,63 @@ class ModalApp(QMainWindow):
         return box
 
     def make_settings(self):
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        content = QWidget()
-        scroll.setWidget(content)
-        self.tabs.addTab(scroll, '1. Configuração do ensaio')
-        layout = QVBoxLayout(content)
-        row = QHBoxLayout()
-        self.mode = QComboBox()
-        self.mode.addItems(['Simulador modal', 'ADS 1800 real'])
-        self.ip = QLineEdit('192.168.1.180')
-        row.addWidget(self.mode)
-        row.addWidget(self.ip)
-        self.connect_button = self.button('Conectar', self.connect_device, row)
-        self.connection = QLabel('Desconectado')
-        row.addWidget(self.connection)
-        layout.addLayout(row)
-        self.settings = QWidget()
-        grid = QGridLayout(self.settings)
-        layout.addWidget(self.settings)
-        form = QFormLayout()
-        grid.addLayout(form, 0, 0)
-        self.fields = {}
-        c = ModalConfig()
-        self.temperature = QLineEdit()
-        self.temperature.setPlaceholderText('Não medida (opcional)')
-        form.addRow('Temperatura ambiente no início [°C]', self.temperature)
-        for key, label, low, high in [
-            ('duration', 'Registro total [s]', .01, 600), ('pretrigger', 'Pré-trigger [s]', .001, 60),
-            ('threshold', 'Trigger de força [N]', .0001, 1e9), ('force_width', 'Janela de força após trigger [s]', .0001, 60),
-            ('exponential_end', 'Resíduo exponencial final (0–1)', .0001, 1),
-            ('force_factor', 'Fator: unidade do canal → N', -1e9, 1e9),
-            ('response_factor', 'Fator: unidade do canal → m/s²', -1e9, 1e9)]:
-            self.fields[key] = self.number(getattr(c, key), low, high)
-            form.addRow(label, self.fields[key])
-        self.rate = QComboBox()
-        self.rate.addItems([str(v) for v in ADS1800_SAMPLE_RATES])
-        self.rate.setCurrentText('2000')
-        form.insertRow(0, 'Amostragem [Hz]', self.rate)
-        self.bandpass = QCheckBox('Ativar filtro passa-banda em todos os resultados')
-        self.bandpass.setChecked(True)
-        form.addRow(self.bandpass)
-        for key, label, default in [('low_cut', 'Corte inferior [Hz]', 1), ('high_cut', 'Corte superior [Hz]', 500)]:
-            self.fields[key] = self.number(default, .0001, 1e6)
-            form.addRow(label, self.fields[key])
-            self.bandpass.toggled.connect(self.fields[key].setEnabled)
-        for key, label, items in [('polarity', 'Polaridade do trigger', ['Absoluto', 'Positivo', 'Negativo']),
-                                 ('force_window', 'Janela do martelo', ['Força', 'Retangular', 'Hann']),
-                                 ('response_window', 'Janela da aceleração', ['Exponencial', 'Retangular', 'Hann'])]:
-            box = QComboBox()
-            box.addItems(items)
-            self.fields[key] = box
-            form.addRow(label, box)
-        self.averages = QSpinBox()
-        self.averages.setRange(2, 10000)
-        self.averages.setValue(3)
-        form.addRow('Meta de batidas aceitas por ponto', self.averages)
-        self.force_channel, self.response_channel = QComboBox(), QComboBox()
-        form.addRow('Canal do martelo', self.force_channel)
-        form.addRow('Canal do acelerômetro fixo', self.response_channel)
-        shape = QFormLayout()
-        grid.addLayout(shape, 0, 1)
-        self.outline = QTextEdit()
-        self.points = QTextEdit()
-        self.outline.setPlainText('0; 0\n1; 0\n1; 0.5\n0; 0.5')
-        self.points.setPlainText('P1; 0.1; 0.25\nP2; 0.5; 0.25\nP3; 0.9; 0.25')
-        self.outline.setMaximumHeight(130)
-        self.points.setMinimumHeight(170)
-        shape.addRow('Contorno: x; y [m], um vértice por linha', self.outline)
-        shape.addRow('Impactos: nome; x; y [m], um ponto por linha', self.points)
-        self.ax, self.ay = self.number(.5, -1e6, 1e6), self.number(.25, -1e6, 1e6)
-        shape.addRow('Acelerômetro fixo — X [m]', self.ax)
-        shape.addRow('Acelerômetro fixo — Y [m]', self.ay)
-        self.extra_sensors = SensorTable()
-        shape.addRow('Acelerômetros adicionais (canais do equipamento conectado)', self.extra_sensors)
-        self.preview = Geometry()
-        shape.addRow(self.preview)
-        self.button('Atualizar desenho', self.preview_geometry, shape)
-        note = QLabel('Configure sensores e faixas no Assistente LYNX. Os canais já chegam em unidades de engenharia; '
-                      'os fatores acima convertem apenas para SI (ex.: g → m/s²: 9,80665).\n'
-                      'Janela exponencial altera o amortecimento aparente. Hann pode atenuar o impacto; '
-                      'use retangular quando toda a resposta já decai dentro do registro.\n'
-                      'Passa-banda: corte superior deve ser menor que metade da amostragem. '
-                      'Para 1–500 Hz, use mais de 1000 amostras/s (padrão: 2000). Trigger e alertas da batida usam o sinal original.')
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        row = QHBoxLayout()
-        self.button('Salvar configuração…', self.save_config, row)
-        self.button('Carregar configuração…', self.load_config, row)
-        self.open_button = self.button('Abrir ensaio salvo…', self.open_session, row)
-        self.import_button = self.button('Importar trecho CSV…', self.import_csv, row)
-        layout.addLayout(row)
-        self.start_button = self.button('Iniciar novo ensaio…', self.start, layout)
+        build_settings(self, Geometry)
+
+    def update_block_summary(self, *_):
+        try:
+            rate = float(self.rate.currentText())
+            n = round(rate*self.fields['duration'].value())
+            self.block_summary.setText(f'{n} amostras · Δf {rate/max(1, n):.4g} Hz')
+        except ValueError:
+            self.block_summary.setText('Selecione uma taxa disponível.')
+
+    def clear_setup(self):
+        self.setup_study = None
+        self.setup_form_signature = None
+        self.setup_status.setText('Configuração manual. O próximo ensaio usará os parâmetros dos campos acima.')
+
+    @staticmethod
+    def setup_signature(config):
+        values = asdict(config)
+        # Physical limits are checked again on connection. These other values
+        # have no editable widgets and are supplied by the confirmed study.
+        for key in ('force_limits', 'response_limits', 'analysis_band', 'trigger_offset',
+                    'rearm_noise_limits', 'quiet_duration'):
+            values.pop(key, None)
+        for sensor in values['additional_accelerometers']:
+            sensor.pop('limits', None)
+        return json.dumps(values, sort_keys=True)
+
+    def configure_by_impacts(self):
+        try:
+            config = self.read_config(True, for_setup=True)
+            rates = [float(self.rate.itemText(i)) for i in range(self.rate.count())]
+            dialog = ModalSetupDialog(self.backend, config, self.channels, rates, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            study = dialog.study
+            c = study.recommendation.config
+            self.clear_setup()
+            for key, widget in self.fields.items():
+                if isinstance(widget, QComboBox):
+                    widget.setCurrentText(getattr(c, key))
+                else:
+                    widget.setValue(getattr(c, key))
+            self.rate.setCurrentText(f'{c.sample_rate:g}')
+            self.bandpass.setChecked(c.bandpass_enabled)
+            self.setup_form_signature = self.setup_signature(self.read_config(True))
+            self.setup_study = study
+            self.config_tabs.setCurrentIndex(2)
+            self.update_block_summary()
+            self.setup_status.setText(f'Configuração confirmada: {c.sample_rate:g} Hz · {c.duration:.4g} s · '
+                                      f'{c.n} amostras · Δf {c.sample_rate/c.n:.4g} Hz. '
+                                      'Diagnóstico e batidas exploratórias serão salvos com o próximo ensaio.')
+        except Exception as exc:
+            self.error(exc)
 
     def make_acquisition(self):
         widget = QWidget()
-        self.tabs.addTab(widget, '2. Impactos e resultados')
+        self.tabs.addTab(widget, 'Monitor de impactos')
         layout = QVBoxLayout(widget)
         row = QHBoxLayout()
         self.point = QComboBox()
@@ -301,14 +269,19 @@ class ModalApp(QMainWindow):
             backend = self.backend
             def disconnected(_):
                 self.backend = self.controller = None
+                self.channels = []
+                populate_channel_info(self)
+                self.clear_setup()
                 self.connection.setText('Desconectado')
                 self.extra_sensors.set_channels([])
             self.work(backend.disconnect, disconnected)
             return
         backend = ModalSimulatorBackend() if self.mode.currentIndex() == 0 else LynxBackend()
         def connected(info):
+            self.clear_setup()
             self.backend = backend
             self.channels = info.channels
+            populate_channel_info(self)
             self.extra_sensors.set_channels(self.channels)
             self.connection.setText(info.name)
             for combo in (self.force_channel, self.response_channel):
@@ -322,7 +295,7 @@ class ModalApp(QMainWindow):
             self.rate.setCurrentText(previous)
         self.work(lambda: backend.connect(self.ip.text()), connected)
 
-    def read_config(self, require_channels=False):
+    def read_config(self, require_channels=False, *, for_setup=False):
         values = {k: w.currentText() if isinstance(w, QComboBox) else w.value() for k, w in self.fields.items()}
         def rows(text, names=False):
             result = []
@@ -353,12 +326,22 @@ class ModalApp(QMainWindow):
                 ch = by_id[sensor['channel']]
                 if ch.engineering_min is not None and ch.engineering_max is not None:
                     sensor['limits'] = sorted([ch.engineering_min*sensor['factor'], ch.engineering_max*sensor['factor']])
+        if for_setup:
+            rates = sorted(float(self.rate.itemText(i)) for i in range(self.rate.count()))
+            safe_rate = next((r for r in rates if r >= 2000), max(rates))
+            c = replace(c, sample_rate=safe_rate, duration=2, pretrigger=.05,
+                        force_width=.03, bandpass_enabled=False, analysis_band=None,
+                        response_window='Retangular', exponential_end=1,
+                        rearm_noise_limits=(), trigger_offset=0)
         c.validate()
+        if not for_setup and self.setup_study and self.setup_signature(c) == self.setup_form_signature:
+            # Preserve the exact confirmed values despite display rounding.
+            return ModalConfig.from_dict(json.loads(json.dumps(asdict(self.setup_study.recommendation.config))))
         return c
 
     def preview_geometry(self):
         try:
-            self.preview.config = self.read_config()
+            self.preview.config = self.read_config(for_setup=True)
             self.preview.update()
         except Exception as exc:
             self.error(exc)
@@ -384,6 +367,7 @@ class ModalApp(QMainWindow):
         try:
             c = ModalConfig.from_dict(json.loads(Path(path).read_text(encoding='utf-8')))
             c.validate()
+            self.clear_setup()
             if any(s['channel'] not in [ch.number for ch in self.channels] for s in c.sensors):
                 raise ValueError('Canal de acelerômetro não disponível neste equipamento.')
             if self.rate.findText(f'{c.sample_rate:g}') < 0:
@@ -448,6 +432,8 @@ class ModalApp(QMainWindow):
     def start(self):
         try:
             c = self.read_config(True)
+            if self.setup_study and not self.setup_study.matches(c):
+                raise ValueError('A configuração foi alterada após a confirmação. Repita o assistente ou escolha Usar configuração manual.')
             directory = QFileDialog.getExistingDirectory(self, 'Pasta para o novo ensaio')
             if not directory:
                 return
@@ -457,6 +443,10 @@ class ModalApp(QMainWindow):
             path = Path(directory)/f'modal_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}'
             self.session = ModalSession(path, c, {'mode': self.mode.currentText(), 'device_ip': self.ip.text(),
                                                  'channels': [asdict(ch) for ch in selected]})
+            if self.setup_study:
+                self.setup_study.save(path/'configuracao')
+                self.session.metadata['modal_setup'] = self.setup_study.report()
+                self.session.save_manifest()
             self.post.set_session(self.session)
             self.set_sensors(c)
             self.capture = ImpactCapture(c)
@@ -794,11 +784,15 @@ class ModalApp(QMainWindow):
         running = bool(self.controller and self.controller.running)
         armed = bool(self.capture and self.capture.armed)
         self.settings.setEnabled(not running and not self.busy)
+        self.channel_settings.setEnabled(not running and not self.busy)
+        self.geometry_settings.setEnabled(not running and not self.busy)
         self.mode.setEnabled(not self.backend and not self.busy)
         self.ip.setEnabled(not self.backend and not self.busy)
         self.connect_button.setEnabled(not running and not self.busy)
         self.connect_button.setText('Desconectar' if self.backend else 'Conectar')
         self.start_button.setEnabled(bool(self.backend) and not running and not self.busy and self.pending is None)
+        self.setup_button.setEnabled(bool(self.backend) and not running and not self.busy and self.pending is None)
+        self.manual_button.setEnabled(not running and not self.busy)
         self.open_button.setEnabled(not running and not self.busy and self.pending is None)
         self.import_button.setEnabled(not running and not self.busy and self.pending is None)
         self.arm_button.setEnabled(running and not armed and self.pending is None and not self.busy)

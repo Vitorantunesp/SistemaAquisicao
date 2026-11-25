@@ -70,6 +70,7 @@ class ChannelCanvas(QWidget):
         self.y_range = (-1, 1)
         self.x_label = 'Tempo [s]'
         self.frequency_markers = []
+        self.empty_message = 'Aguardando amostras...'
         self.setMouseTracking(True)
 
     def plot_rect(self):
@@ -145,8 +146,12 @@ class ChannelCanvas(QWidget):
         painter.drawText(QRectF(left, bottom+text_height+5, rect.width(), text_height),
                          Qt.AlignmentFlag.AlignCenter, self.x_label)
         if not len(self.times):
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, 'Aguardando amostras...')
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.empty_message)
             return
+        painter.save()
+        painter.setClipRect(rect)
+        self.paint_signal_region(painter)
+        painter.restore()
         painter.setClipRect(rect)
         painter.setPen(QPen(QColor(self.color), 1.4))
         points = QPolygonF()
@@ -159,6 +164,10 @@ class ChannelCanvas(QWidget):
                                   bottom - (self.values[i] - y0) / (y1 - y0) * rect.height()))
         painter.drawPolyline(points)
         self.paint_frequency_markers(painter)
+
+    def paint_signal_region(self, painter):
+        """Optional acquisition-window background, beneath the signal trace."""
+        pass
 
 
 class ChannelPlot(QWidget):

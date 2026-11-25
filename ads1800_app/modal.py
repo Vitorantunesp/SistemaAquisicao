@@ -39,6 +39,10 @@ class ModalConfig:
     accelerometer: list = field(default_factory=lambda: [.5, .25])
     additional_accelerometers: list = field(default_factory=list)
     ambient_temperature_c: float | None = None
+    analysis_band: tuple | None = None
+    trigger_offset: float = 0
+    rearm_noise_limits: tuple = ()
+    quiet_duration: float = .2
 
     @property
     def sensors(self):
@@ -48,7 +52,8 @@ class ModalConfig:
     def for_sensor(self, index):
         sensor = self.sensors[index]
         return replace(self, response_channel=sensor['channel'], accelerometer=sensor['position'],
-                       response_factor=sensor['factor'], response_limits=sensor.get('limits'), additional_accelerometers=[])
+                       response_factor=sensor['factor'], response_limits=sensor.get('limits'), additional_accelerometers=[],
+                       rearm_noise_limits=(self.rearm_noise_limits[index],) if self.rearm_noise_limits else ())
 
     @property
     def n(self):
@@ -59,6 +64,15 @@ class ModalConfig:
         return round(self.pretrigger * self.sample_rate)
 
     def validate(self):
+        if not math.isfinite(self.trigger_offset) or not math.isfinite(self.quiet_duration) or not .01 <= self.quiet_duration <= 10:
+            raise ValueError('Linha de base do trigger ou tempo de repouso inválido.')
+        if self.analysis_band is not None and (len(self.analysis_band) != 2 or
+                not all(math.isfinite(v) for v in self.analysis_band) or
+                not 0 < self.analysis_band[0] < self.analysis_band[1] < self.sample_rate/2):
+            raise ValueError('Banda de análise deve ser positiva e inferior a Nyquist.')
+        if self.rearm_noise_limits and (len(self.rearm_noise_limits) != len(self.sensors) or
+                not all(math.isfinite(v) and v > 0 for v in self.rearm_noise_limits)):
+            raise ValueError('Limites de repouso devem corresponder aos acelerômetros.')
         if self.ambient_temperature_c is not None and (not math.isfinite(self.ambient_temperature_c) or self.ambient_temperature_c < -273.15):
             raise ValueError('Temperatura ambiente deve ser finita, em °C, e não inferior ao zero absoluto.')
         numbers = [self.sample_rate, self.duration, self.pretrigger, self.threshold,
@@ -77,6 +91,8 @@ class ModalConfig:
             raise ValueError('Duração da janela de força deve caber no pós-trigger.')
         if not 0 < self.exponential_end <= 1 or self.averages < 2:
             raise ValueError('Resíduo exponencial deve estar em (0, 1]; use pelo menos 2 médias.')
+        if self.response_window == 'Exponencial' and -np.log(self.exponential_end)*self.pre/(self.n-self.pre-1) > 20:
+            raise ValueError('Exponencial amplifica demais o pré-trigger. Reduza o pré-trigger ou use uma exponencial mais suave.')
         if self.force_channel == self.response_channel or min(self.force_channel, self.response_channel) < 0:
             raise ValueError('Selecione canais distintos para força e aceleração.')
         if self.force_factor == 0 or self.response_factor == 0:
@@ -144,6 +160,11 @@ class ImpactCapture:
         self.point = None
         self.last_time = None
         self.below = False
+        self.quiet_armed = False
+        self.quiet_history = deque(maxlen=max(2, round(config.quiet_duration*config.sample_rate)))
+        self._quiet_revision = 0
+        self._quiet_checked = -max(1, round(.02*config.sample_rate))
+        self._quiet_cached = False
 
     def arm(self, point):
         if point not in [p[0] for p in self.config.points]:
@@ -152,6 +173,7 @@ class ImpactCapture:
         self.pending = None
         self.armed = True
         self.below = False
+        self.quiet_armed = False
 
     def cancel(self):
         self.armed = False
@@ -159,7 +181,27 @@ class ImpactCapture:
 
     @property
     def ready(self):
-        return self.armed and self.pending is None and self.below and len(self.history) == self.config.pre
+        waiting = self.armed and self.pending is None and self.below and len(self.history) == self.config.pre
+        if waiting and self.config.rearm_noise_limits:
+            f = self.history[-1][1]-self.config.trigger_offset
+            if abs(f) < self.config.threshold*.01:
+                # Refresh at display/status frequency, so the announced ready
+                # state is current without scanning a long buffer per sample.
+                self._quiet_checked = self._quiet_revision-max(1, round(.02*self.config.sample_rate))
+                self.quiet_armed = self.response_quiet
+        return bool(waiting and self.quiet_armed)
+
+    @property
+    def response_quiet(self):
+        if not self.config.rearm_noise_limits:
+            return True
+        if len(self.quiet_history) < self.quiet_history.maxlen:
+            return False
+        # Remove local DC, but retain residual vibration when deciding to rearm.
+        if self._quiet_revision-self._quiet_checked >= max(1, round(.02*self.config.sample_rate)):
+            self._quiet_cached = bool(np.all(np.std(np.asarray(self.quiet_history), axis=0) <= self.config.rearm_noise_limits))
+            self._quiet_checked = self._quiet_revision
+        return self._quiet_cached
 
     def feed(self, times, force, acceleration):
         acceleration = np.asarray(acceleration)
@@ -178,6 +220,10 @@ class ImpactCapture:
                     not .5 / c.sample_rate < t-self.last_time < 1.5 / c.sample_rate):
                 self.cancel()
                 self.history.clear()
+                self.quiet_history.clear()
+                self._quiet_cached = False
+                self._quiet_revision = 0
+                self._quiet_checked = -max(1, round(.02*c.sample_rate))
                 self.last_time = None
                 raise ValueError('Descontinuidade ou amostras inválidas: batida cancelada; rearme.')
             self.last_time = t
@@ -188,12 +234,23 @@ class ImpactCapture:
                     result = (self.point, np.asarray(self.pending))
                     self.cancel()
             elif self.armed and len(self.history) == c.pre:
-                level = abs(f) if c.polarity == 'Absoluto' else f if c.polarity == 'Positivo' else -f
+                centered = f-c.trigger_offset
+                level = abs(centered) if c.polarity == 'Absoluto' else centered if c.polarity == 'Positivo' else -centered
                 if level < c.threshold * .5:
                     self.below = True
+                    # Check quiet before the pulse rises, then retain readiness
+                    # through the rising edge. Its own acceleration must not
+                    # veto a higher (50%-of-peak) force trigger.
+                    if level < c.threshold*.01:
+                        self.quiet_armed = self.response_quiet
                 if self.below and level >= c.threshold:
-                    self.pending = list(self.history) + [row]
+                    if self.quiet_armed:
+                        self.pending = list(self.history) + [row]
+                    self.below = False
+                    self.quiet_armed = False
             self.history.append(row)
+            self.quiet_history.append(a)
+            self._quiet_revision += 1
         return result
 
 
@@ -211,8 +268,23 @@ def windows(c):
     if c.response_window == 'Hann':
         response = np.hanning(c.n)
     elif c.response_window == 'Exponencial':
-        response[c.pre:] = np.exp(np.linspace(0, np.log(c.exponential_end), c.n-c.pre))
+        # A common exponential preserves the shifted transfer function H(alpha+iw).
+        # Anchor it at the trigger, including its continuation in the pretrigger.
+        response = np.exp(-exponential_alpha(c)*(np.arange(c.n)-c.pre)/c.sample_rate)
+        force *= response
     return force, response
+
+
+def exponential_alpha(c):
+    if c.response_window != 'Exponencial':
+        return 0.0
+    return float(-np.log(c.exponential_end)/((c.n-c.pre-1)/c.sample_rate))
+
+
+def hit_spectra(c, force, acceleration):
+    f, a = processed_signals(c, force, acceleration)
+    wf, wa = windows(c)
+    return np.fft.rfft(f*wf), np.fft.rfft(a*wa), f*wf, a*wa
 
 
 def analyze_hit(c, data):
@@ -222,9 +294,7 @@ def analyze_hit(c, data):
     baseline = max(1, c.pre//2)
     f = data[:, 1] - np.mean(data[:baseline, 1])
     a = data[:, 2] - np.mean(data[:baseline, 2])
-    processed_f, processed_a = processed_signals(c, data[:, 1], data[:, 2])
-    wf, wa = windows(c)
-    F, A = np.fft.rfft(processed_f*wf), np.fft.rfft(processed_a*wa)
+    F, A, windowed_f, windowed_a = hit_spectra(c, data[:, 1], data[:, 2])
     issues = []
     peak = float(np.max(abs(f)))
     noise = float(np.std(f[:baseline]))
@@ -271,7 +341,7 @@ def analyze_hit(c, data):
         end = c.pre + round(c.force_width*c.sample_rate)
         if np.max(abs(f[max(c.pre, end-2):])) > .05*max(peak, 1e-30):
             issues.append('Força fora da janela (>5% do pico)')
-    return {'F': F, 'A': A, 'force': processed_f*wf, 'acceleration': processed_a*wa,
+    return {'F': F, 'A': A, 'force': windowed_f, 'acceleration': windowed_a,
             'peak_N': peak, 'snr_dB': snr, 'tail_ratio': decay, 'issues': issues}
 
 
@@ -306,6 +376,8 @@ def ensemble(c, hits):
     valid = (ff > max(float(ff.max())*1e-10, 1e-30)) & (aa > 1e-30)
     if c.bandpass_enabled:
         valid &= (freq >= c.low_cut) & (freq <= c.high_cut)
+    if c.analysis_band is not None:
+        valid &= (freq >= c.analysis_band[0]) & (freq <= c.analysis_band[1])
     h1 = np.full(len(freq), np.nan, complex)
     h1[valid] = af[valid]/ff[valid]
     coherence = np.full(len(freq), np.nan)
@@ -376,6 +448,7 @@ class ModalSession:
                             acceleration_m_s2=data[:, 2], F=analysis['F'], A=analysis['A'], **arrays)
         record = {'point': point, 'file': filename, 'status': 'pendente',
                   'trigger': {'threshold_N': self.config.threshold, 'polarity': self.config.polarity,
+                              'offset_N': self.config.trigger_offset,
                               'double_hit_gap_s': self.config.double_hit_gap},
                   **{key: analysis[key] for key in ('peak_N', 'snr_dB', 'tail_ratio', 'issues')}}
         record['sensors'] = {s['name']: {k: a[k] for k in ('tail_ratio', 'issues')} for s, a in zip(self.config.sensors, analyses)}

@@ -8,6 +8,8 @@ from ads1800_app.config import ADS1800_SAMPLE_RATES, ChannelConfig
 
 class ModalSimulatorBackend(SimulatorBackend):
     period = 4.0
+    impacts_enabled = True
+    impact_start = 1.0
 
     def connect(self, ip):
         self._connected = True
@@ -28,8 +30,10 @@ class ModalSimulatorBackend(SimulatorBackend):
         times, _ = super().read()
         if not times:
             return [], []
-        phase = (np.asarray(times)-1) % self.period
+        phase = (np.asarray(times)-self.impact_start) % self.period
         force = np.where(phase < .008, 100*np.sin(np.pi*phase/.008), 0)
+        if not self.impacts_enabled:
+            force[:] = 0
         acceleration = np.zeros(len(times))
         for f in self.filters:
             response, f[2] = lfilter(f[0], f[1], force, zi=f[2])

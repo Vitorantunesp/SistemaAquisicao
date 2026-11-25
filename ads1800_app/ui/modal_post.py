@@ -300,6 +300,11 @@ class PostPanel(QWidget):
             high = session.config.high_cut if session.config.bandpass_enabled else nyquist
             self.fields['fmax'].setValue(min(max(200, low+(high-low)/2), high))
             self.fields['fmin'].setValue(max(low, min(5, high/10)))
+            if session.config.analysis_band:
+                self.fields['fmin'].setValue(session.config.analysis_band[0])
+                self.fields['fmax'].setValue(session.config.analysis_band[1])
+            self.fields['exponential_end'].setValue(session.config.exponential_end
+                if session.config.response_window == 'Exponencial' else 1)
         self.invalidate()
 
     def reference_changed(self, *_):

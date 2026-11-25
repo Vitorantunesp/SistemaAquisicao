@@ -13,7 +13,7 @@ import numpy as np
 from scipy.optimize import least_squares, linear_sum_assignment
 from scipy.signal import find_peaks
 
-from ads1800_app.modal import ensemble, processed_signals
+from ads1800_app.modal import ensemble, hit_spectra, exponential_alpha
 
 
 @dataclass
@@ -69,8 +69,11 @@ def prepare_data(session, settings, sensor=0):
     settings.validate(c.sample_rate/2)
     if c.bandpass_enabled and not c.low_cut <= settings.fmin < settings.fmax <= c.high_cut:
         raise ValueError(f'A faixa do ajuste deve ficar dentro do passa-banda do ensaio ({c.low_cut:g} a {c.high_cut:g} Hz).')
-    alpha = -np.log(settings.exponential_end)/((c.n-1)/c.sample_rate)
-    window = np.exp(-alpha*np.arange(c.n)/c.sample_rate)
+    if c.analysis_band and not c.analysis_band[0] <= settings.fmin < settings.fmax <= c.analysis_band[1]:
+        raise ValueError('A faixa do ajuste deve ficar dentro da banda confirmada no assistente.')
+    c = replace(c, response_window='Retangular' if settings.exponential_end == 1 else 'Exponencial',
+                exponential_end=settings.exponential_end)
+    alpha = exponential_alpha(c)
     ids, counts, frfs, coherences, sources, warnings = [], [], [], [], [], []
     for name, *_ in c.points:
         records = [r for r in session.records if r['point'] == name and r['status'] == 'aceita']
@@ -84,8 +87,8 @@ def prepare_data(session, settings, sensor=0):
                 a = (saved['acceleration_m_s2'] if sensor == 0 else saved['accelerations_m_s2'][:, sensor]).copy()
             if f.shape != (c.n,) or a.shape != (c.n,) or not np.isfinite([f, a]).all():
                 raise ValueError(f'{name}: captura inválida.')
-            f, a = processed_signals(c, f, a)
-            hits.append({'F': np.fft.rfft(f*window), 'A': np.fft.rfft(a*window)})
+            F, A, _, _ = hit_spectra(c, f, a)
+            hits.append({'F': F, 'A': A})
             sources.append({'point': name, 'file': record['file'], 'accelerometer': sensor_name})
             issues = record.get('sensors', {}).get(sensor_name, record).get('issues', [])
             if issues:

@@ -76,11 +76,12 @@ salvas separadamente e carregadas após conectar, para conferir canais e taxa.
 | Martelo | Força (padrão) | Mantém pré-trigger e pulso; fecha após a duração configurada, com transição cosseno nos últimos 20% do pós-trigger da janela. |
 | Martelo e aceleração | Retangular | Usa todo o registro sem atenuação. Adequada quando o transitório termina no registro. |
 | Martelo e aceleração | Hann | Atenua as extremidades; pode diminuir muito um impacto próximo ao início. |
-| Aceleração | Exponencial (padrão) | Valor 1 até o trigger, decaindo até o resíduo final escolhido; 0,01 corresponde a 1%. |
+| Martelo e aceleração | Exponencial comum | Valor 1 no trigger, com continuação exponencial no pré-trigger, decaindo até o resíduo final escolhido; 0,01 corresponde a 1%. Multiplica também a janela de força. |
 
 A janela de força deve conter todo o contato. A exponencial reduz vazamento, mas
 introduz amortecimento artificial e pode enviesar a FRF. A FRF de aquisição não é
-corrigida; o pós-processamento usa uma exponencial comum com correção própria,
+corrigida; aquisição e pós-processamento compartilham o mesmo cálculo de janelas,
+e a identificação considera a constante da exponencial comum,
 descrita abaixo. Para resultados quantitativos, prefira registrar
 todo o decaimento e conferir o efeito das janelas.
 
@@ -325,12 +326,31 @@ preservando vizinhanças dos candidatos na resolução original.
 
 A mesma janela `exp(-αt)` é aplicada à força e à aceleração, após remover
 a média da primeira metade do pré-trigger e aplicar o passa-banda, se ativado.
-`α = -ln(resíduo) / duração entre primeira
-e última amostra`. A resposta transformada corresponde a `H(α + iω)`, onde o modelo
+`α = -ln(resíduo) / duração entre o trigger e a última amostra`.
+A janela de força é a mesma da aquisição; deve conter todo o pulso.
+A resposta transformada corresponde a `H(α + iω)`, onde o modelo
 é avaliado durante o ajuste. Assim, o amortecimento retornado é o parâmetro físico
 do modelo, levando em conta o decaimento exponencial introduzido. Isso evita aplicar
 uma correção simplificada a FRFs calculadas com janelas diferentes nos dois canais.
 A correção não elimina erros de truncamento, ruído ou inadequação do modelo.
+
+## Configuração assistida por batidas
+
+As etapas principais ficam na navegação lateral. Na configuração, as abas
+superiores separam conexão e seleção de canais, geometria e posições, e parâmetros
+das batidas. O botão **Assistente por batidas…** mantém geometria e canais e abre
+automaticamente o martelo bruto ao vivo no topo, com ajustes à esquerda. Abaixo
+ficam os gráficos da última batida: força e sua PSD, aceleração selecionada e sua
+PSD ou coerência. As janelas são regiões verdes sobre os sinais.
+A primeira batida define trigger de 50% do pico
+e duração baseada no decaimento mais 5%; a segunda verifica variação de pico e
+decaimento até 10%, complementada pela coerência entre as duas batidas. O padrão
+de qualidade é coerência ≥0,90 em 80% da banda avaliável, com exclusão de
+frequências sem sinal suficiente. A taxa continua sendo a menor anunciada com margem para a
+banda desejada. O bloco é consequência desses valores, sem completar amostras
+para potência de dois. A necessidade de janela é indicada automaticamente.
+Ranges são orientações em N e m/s² para ajuste no condicionador, sem escrita no
+equipamento. Veja [critérios e operação](docs/CONFIGURACAO_MODAL_ASSISTIDA.md).
 
 Referências: [B&K — Structural Testing, Part 2](https://www.bksv.com/doc/br0507.pdf),
 [artigo sobre aplicação e correção da janela exponencial](https://www.sciencedirect.com/science/article/pii/S0888327096900849),
