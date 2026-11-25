@@ -50,3 +50,4 @@ if __name__ == '__main__':
             print(f'Canal {canal}: inferior = {inferior:g}; superior = {superior:g}')
     except Exception as erro:
         sys.exit(f'Erro: {erro}')
+
