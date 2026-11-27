@@ -378,10 +378,14 @@ class CalibrationStudy:
                               len(pilot_errors) == len(c.sensors) and max(pilot_errors) <= .25)
         return self.confirmations[-1]
 
-    def matches(self, config):
-        return bool(self.validated and self.recommendation and
-                    json.dumps(asdict(config), sort_keys=True) ==
-                    json.dumps(asdict(self.recommendation.config), sort_keys=True))
+    def matches(self, config, keys=None):
+        """Whether ``config`` uses the confirmed values (only ``keys``, if given)."""
+        if not (self.validated and self.recommendation):
+            return False
+        mine, theirs = asdict(config), asdict(self.recommendation.config)
+        if keys is not None:
+            mine, theirs = ({k: values[k] for k in keys} for values in (mine, theirs))
+        return json.dumps(mine, sort_keys=True) == json.dumps(theirs, sort_keys=True)
 
     def report(self):
         if self.recommendation is None:
@@ -436,32 +440,60 @@ def two_hit_metrics(data, config, profile, sensor=0):
                 tail_rms=float(np.sqrt(np.mean(response[-size:]**2))))
 
 
+# First-hit detection: a fraction of the hammer input span, never closer to
+# the background than NOISE_DETECTION_FACTOR standard deviations.
+INITIAL_DETECTION_FRACTION = .10
+NOISE_DETECTION_FACTOR = 20
+
+
 class TwoHitStudy(CalibrationStudy):
-    """First hit defines settings; a second hit checks peak and decay consistency."""
+    """The first hit defines rate and block; further hits at the final rate
+    check that the suggested parameters are stable (``hits`` in total).
+
+    A hit counts when it agrees, within the tolerances, with a group of other
+    valid hits. The most recent ``hits`` members of the largest group are the
+    series that defines the final trigger, block and force window.
+    """
     def __init__(self, config, rates, settings=None, sensor=0, tolerance=.1,
-                 coherence_threshold=.9, coherence_fraction=.8):
+                 coherence_threshold=.9, coherence_fraction=.8, *, hits=2,
+                 peak_tolerance=.25, detection=None):
         settings = settings or SetupSettings(noise_seconds=.5, minimum_hits=1,
                                              minimum_points=1, confirmation_hits=1)
         super().__init__(config, rates, settings)
         if not 0 <= sensor < len(config.sensors) or not 0 < tolerance <= .5:
             raise ValueError('Canal de referência ou tolerância de consistência inválido.')
+        if not 2 <= int(hits) <= 50 or not 0 < peak_tolerance <= 1:
+            raise ValueError('Use de 2 a 50 batidas e tolerância de pico entre 0 e 100%.')
+        if detection is not None and (not math.isfinite(detection) or detection <= 0):
+            raise ValueError('Nível de detecção da primeira batida deve ser positivo.')
         self.reference_sensor = sensor
         self.tolerance = tolerance
+        self.peak_tolerance = peak_tolerance
+        self.required_hits = int(hits)
+        self.detection = detection
         self.first_metrics = None
         self.coherence_threshold = coherence_threshold
         self.coherence_fraction = coherence_fraction
         self.coherence_result = None
+        self.series = []
+        self.consistency = {}
 
-    def initial_threshold(self):
+    def automatic_threshold(self):
         if not self.noise:
             raise ValueError('Aguarde a medição inicial do ruído.')
         offset = self.noise['offset'][0]
+        floor = max(NOISE_DETECTION_FACTOR*self.noise['sigma'][0], 1e-8)
         if self.base.force_limits:
             low, high = self.base.force_limits
             amplitude = (high-offset if self.base.polarity == 'Positivo' else offset-low
                          if self.base.polarity == 'Negativo' else max(abs(high-offset), abs(low-offset)))
-            return max(.05*amplitude, 6*self.noise['sigma'][0], 1e-8)
-        return max(6*self.noise['sigma'][0], 1e-8)
+            return max(INITIAL_DETECTION_FRACTION*amplitude, floor)
+        return floor
+
+    def initial_threshold(self):
+        if not self.noise:
+            raise ValueError('Aguarde a medição inicial do ruído.')
+        return self.detection if self.detection else self.automatic_threshold()
 
     def pilot_config(self):
         return replace(super().pilot_config(), threshold=self.initial_threshold())
@@ -475,6 +507,8 @@ class TwoHitStudy(CalibrationStudy):
         metrics = two_hit_metrics(data, c, self.noise, self.reference_sensor)
         if not metrics['observable']:
             issues.append('Aceleração do canal escolhido não se distingue do ruído.')
+        if metrics['contact_s'] < 3/c.sample_rate:
+            issues.append('Pulso curto demais para uma batida: provável interferência elétrica.')
         self.pilots = [dict(point=point, data=data, config=asdict(c), metrics=metrics,
                             accepted=not issues, issues=issues)]
         self._invalidate()
@@ -506,10 +540,12 @@ class TwoHitStudy(CalibrationStudy):
         proposed.validate()
         if proposed.threshold < 6*profile['sigma'][0]:
             blockers.append('O trigger de 50% do pico ficou próximo demais do ruído.')
-        if not self.base.force_limits:
-            warnings.append('Faixa do martelo não informada: a primeira detecção usou o ruído em vez de 5% da entrada.')
+        if not self.base.force_limits and not self.detection:
+            warnings.append(f'Faixa do martelo não informada: a primeira detecção usou {NOISE_DETECTION_FACTOR}× o ruído '
+                            f'em vez de {INITIAL_DETECTION_FRACTION:.0%} da entrada.')
         warnings.append('Ranges são recomendações para ajuste físico no condicionador, sem alteração automática da aquisição.')
-        metrics = dict(strategy='two_hits', initial_detection_N=self.initial_threshold(),
+        metrics = dict(strategy='multiple_hits', required_hits=self.required_hits,
+                       peak_tolerance=self.peak_tolerance, initial_detection_N=self.initial_threshold(),
                        reference_sensor=self.base.sensors[self.reference_sensor]['name'],
                        peak_N=m['peak_N'], measured_decay_s=m['decay_s'], duration_margin=.05,
                        pilot_rate=self.pilot_rate, suggested_rate=self.target_rate,
@@ -553,6 +589,55 @@ class TwoHitStudy(CalibrationStudy):
         self.confirmations = records
         self.coherence_result = None
 
+    def clear_confirmations(self):
+        """Start a new verification series; the first hit is kept."""
+        self.confirmations = []
+        self.reset_confirmation()
+        self.series, self.consistency = [], {}
+        if self.recommendation:
+            self._update_from_series()
+            self.evaluate_quality()
+
+    def _valid_hits(self):
+        hits = [self.pilots[0]] if self.pilots and self.pilots[0]['accepted'] else []
+        return hits+[h for h in self.confirmations if not h['base_issues'] and not h.get('excluded')]
+
+    def _deviation(self, hit, anchor):
+        m, a = hit['metrics'], anchor['metrics']
+        return dict(peak=abs(m['peak_N']/max(a['peak_N'], 1e-12)-1),
+                    decay=abs(m['decay_s']/max(a['decay_s'], 1e-12)-1),
+                    contact=abs(m['contact_s']/max(a['contact_s'], 1e-12)-1))
+
+    def _agrees(self, hit, anchor):
+        d = self._deviation(hit, anchor)
+        return d['peak'] <= self.peak_tolerance and d['decay'] <= self.tolerance
+
+    def _select_series(self):
+        """Largest group of valid hits that agree with one anchor hit.
+
+        Ties go to the most recent anchor. An isolated outlier (a weak or
+        doubled hit, a different decay) therefore never blocks the series:
+        further consistent hits form a larger group without it.
+        """
+        valid = self._valid_hits()
+        best, anchor = [], None
+        for candidate in valid:
+            group = [h for h in valid if self._agrees(h, candidate)]
+            if len(group) >= len(best):
+                best, anchor = group, candidate
+        return best[-self.required_hits:], anchor
+
+    def _summary(self, series):
+        if not series:
+            return {}
+        values = {key: [h['metrics'][name] for h in series]
+                  for key, name in [('peak', 'peak_N'), ('decay', 'decay_s'), ('contact', 'contact_s')]}
+        median = {key: float(np.median(v)) for key, v in values.items()}
+        spread = {key: max(abs(x/max(median[key], 1e-12)-1) for x in v) for key, v in values.items()}
+        return dict(count=len(series), required=self.required_hits, median=median,
+                    peak=spread['peak'], decay=spread['decay'], contact=spread['contact'],
+                    peak_tolerance=self.peak_tolerance, decay_tolerance=self.tolerance)
+
     def add_confirmation(self, point, data, config=None):
         c = config or self.confirmation_config()
         data = _check_record(data, c)
@@ -560,42 +645,74 @@ class TwoHitStudy(CalibrationStudy):
         physical_issues = _quality(c, data)
         issues = list(physical_issues)
         if point != self.pilots[0]['point']:
-            issues.append('A segunda batida deve ocorrer no mesmo ponto da primeira.')
+            issues.append('As batidas de conferência devem ocorrer no mesmo ponto da primeira.')
         if not m['settled']:
-            issues.append('Decaimento da segunda batida incompleto ou não observável.')
-        first = self.first_metrics
-        variations = dict(peak=abs(m['peak_N']/max(first['peak_N'], 1e-12)-1),
-                          decay=None if m['decay_s'] is None else abs(m['decay_s']/first['decay_s']-1),
-                          contact=abs(m['contact_s']/max(first['contact_s'], 1e-12)-1))
-        if variations['peak'] > self.tolerance:
-            issues.append(f"Pico variou {variations['peak']:.1%} (limite {self.tolerance:.0%}).")
-        if variations['decay'] is not None and variations['decay'] > self.tolerance:
-            issues.append(f"Decaimento variou {variations['decay']:.1%} (limite {self.tolerance:.0%}).")
-        if m['sign'] != first['sign']:
-            issues.append('O sentido da força mudou entre as duas batidas.')
+            issues.append('Decaimento da batida incompleto ou não observável.')
+        if m['sign'] != self.first_metrics['sign']:
+            issues.append('O sentido da força mudou em relação à primeira batida.')
         record = dict(point=point, data=data, config=asdict(c), metrics=m, noise=self.confirmation_noise,
-                      variations=variations, accepted=not issues, issues=issues,
-                      base_issues=list(issues), spectrally_valid=not physical_issues)
+                      variations={}, accepted=False, issues=list(issues), base_issues=list(issues),
+                      spectrally_valid=not physical_issues, excluded=False)
         self.confirmations.append(record)
-        self.validated = not issues
-        self.recommendation.metrics['consistency'] = variations
-        if self.validated:
-            result = self.recommendation.config
-            # Keep the trigger at exactly 50% of the first peak. The same 5%
-            # block margin covers the slower of two consistent decays.
-            post = max(first['decay_s'], m['decay_s'])*1.05
-            n = math.ceil((result.pretrigger+post)*result.sample_rate)
-            width = max(result.force_width, (m['force_end_s']+8/result.sample_rate)/.8)
-            result = replace(result, duration=n/result.sample_rate, force_width=width)
-            result.validate()
-            self.recommendation.config = result
-            self.recommendation.ranges = self._ranges([self.pilots[0], record])
-            self.recommendation.metrics.update(duration_s=result.duration, block_size=result.n,
-                measured_decay_s=max(first['decay_s'], m['decay_s']),
-                frequency_spacing_hz=result.sample_rate/result.n,
-                bytes_per_hit=8*result.n*(2+len(result.sensors)))
+        self.validated = False
+        if record['base_issues']:
+            self.evaluate_quality()
+            return record
+        self._update_from_series()
         self.evaluate_quality()
+        in_series = len(self.series) >= 2 and any(h is record for h in self.series)
+        quality = self.coherence_result['summary'] if self.coherence_result else {}
+        if in_series and len(self.series) > 2 and not quality.get('passed'):
+            # A single incoherent hit (another point, inverted sensor) must not
+            # discard a coherent group: reject it and keep the others.
+            record['excluded'] = True
+            reasons = list(quality.get('reasons', []))
+            self._update_from_series()
+            self.evaluate_quality()
+            record['issues'] = record['base_issues']+reasons
+            record['accepted'] = False
         return record
+
+    def _update_from_series(self):
+        series, anchor = self._select_series()
+        self.series = series
+        self.consistency = self._summary(series)
+        self.recommendation.metrics['consistency'] = self.consistency
+        if len(series) < self.required_hits:
+            return
+        result = self.recommendation.config
+        # Trigger at 50% of the weakest hit of the series, so every hit of
+        # similar strength triggers; block covers the slowest decay + 5%.
+        peak = min(h['metrics']['peak_N'] for h in series)
+        decay = max(h['metrics']['decay_s'] for h in series)
+        force_end = max(h['metrics']['force_end_s'] for h in series)
+        n = math.ceil((result.pretrigger+1.05*decay)*result.sample_rate)
+        width = max(.002, (force_end+8/result.sample_rate)/.8)
+        result = replace(result, duration=n/result.sample_rate, force_width=width, threshold=.5*peak)
+        result.validate()
+        self.recommendation.config = result
+        self.recommendation.ranges = self._ranges(series)
+        self.recommendation.metrics.update(duration_s=result.duration, block_size=result.n,
+            measured_decay_s=decay, peak_N=peak, frequency_spacing_hz=result.sample_rate/result.n,
+            bytes_per_hit=8*result.n*(2+len(result.sensors)))
+
+    def _record_messages(self, record):
+        """Why a physically valid hit is outside the selected series."""
+        others = ([h for h in self.series if h is not record] or
+                  [h for h in self._valid_hits() if h is not record])
+        if not others:
+            return []
+        reference = {key: float(np.median([h['metrics'][name] for h in others]))
+                     for key, name in [('peak', 'peak_N'), ('decay', 'decay_s')]}
+        peak = abs(record['metrics']['peak_N']/max(reference['peak'], 1e-12)-1)
+        decay = abs(record['metrics']['decay_s']/max(reference['decay'], 1e-12)-1)
+        record['variations'] = dict(peak=peak, decay=decay)
+        messages = []
+        if peak > self.peak_tolerance:
+            messages.append(f'Pico variou {peak:.1%} em relação às demais batidas (limite {self.peak_tolerance:.0%}).')
+        if decay > self.tolerance:
+            messages.append(f'Decaimento variou {decay:.1%} em relação às demais batidas (limite {self.tolerance:.0%}).')
+        return messages
 
     def evaluate_quality(self):
         if not self.recommendation:
@@ -604,24 +721,33 @@ class TwoHitStudy(CalibrationStudy):
         if not 0 < self.coherence_threshold <= 1 or not 0 < self.coherence_fraction <= 1:
             raise ValueError('Os critérios de coerência devem estar entre zero e um.')
         config = self.recommendation.config
-        records = self.pilots[:1]
-        profile = noise_profile(_resample(self.baseline, self.pilot_rate, config.sample_rate))
-        profiles = [profile]
-        if self.confirmations:
-            records = records+[self.confirmations[-1]]
-            profiles.append(self.confirmations[-1]['noise'])
+        baseline = noise_profile(_resample(self.baseline, self.pilot_rate, config.sample_rate))
+        series = self.series if self.confirmations else self.pilots[:1]
+        records = [h for h in series] or self.pilots[:1]
+        profiles = [baseline if h is (self.pilots[0] if self.pilots else None) else h['noise'] for h in records]
         self.coherence_result = assess_setup_coherence(records, config, profiles, self.reference_sensor,
             threshold=self.coherence_threshold, required_fraction=self.coherence_fraction)
         summary = self.coherence_result['summary']
         self.recommendation.metrics['coherence_quality'] = summary
+        complete = len(self.series) >= self.required_hits
+        self.validated = bool(self.confirmations and complete and summary['passed']
+                              and not self.recommendation.blockers)
         if self.confirmations:
             last = self.confirmations[-1]
-            last['issues'] = list(last['base_issues'])+list(summary['reasons'])
-            last['accepted'] = not last['issues'] and not self.recommendation.blockers and summary['passed']
-            self.validated = last['accepted']
-        else:
-            self.validated = False
+            if not last.get('excluded'):
+                in_series = len(self.series) >= 2 and any(h is last for h in self.series)
+                messages = [] if last['base_issues'] or in_series else self._record_messages(last)
+                if not last['base_issues'] and not in_series and not messages:
+                    messages = ['Batida fora do grupo consistente de batidas.']
+                if in_series:
+                    last['variations'] = self._deviation(last, self.series[0]) if len(self.series) > 1 else {}
+                coherence = [] if summary['passed'] or len(records) < 2 or not in_series else list(summary['reasons'])
+                last['issues'] = list(last['base_issues'])+messages+coherence
+                last['accepted'] = not last['issues']
         return self.coherence_result
+
+    def missing_hits(self):
+        return max(0, self.required_hits-len(self.series))
 
     def save(self, directory):
         super().save(directory)

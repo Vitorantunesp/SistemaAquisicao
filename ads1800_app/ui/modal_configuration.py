@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGridLayout, QComboBox, QLineEdit, QLabel, QTabWidget, QScrollArea,
     QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QCheckBox, QSpinBox)
 
-from ads1800_app.config import ADS1800_SAMPLE_RATES
+from ads1800_app.config import ADS1800_SAMPLE_RATES, DEFAULT_DEVICE_IP
 from ads1800_app.modal import ModalConfig
 from ads1800_app.ui.modal_sensors import SensorTable
 
@@ -30,7 +30,7 @@ def build_settings(owner, geometry_class):
     row = QHBoxLayout()
     owner.mode = QComboBox()
     owner.mode.addItems(['Simulador modal', 'ADS 1800 real'])
-    owner.ip = QLineEdit('192.168.1.180')
+    owner.ip = QLineEdit(DEFAULT_DEVICE_IP)
     row.addWidget(owner.mode)
     row.addWidget(QLabel('IP do equipamento'))
     row.addWidget(owner.ip)

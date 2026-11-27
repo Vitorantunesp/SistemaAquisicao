@@ -70,6 +70,7 @@ class ChannelCanvas(QWidget):
         self.y_range = (-1, 1)
         self.x_label = 'Tempo [s]'
         self.frequency_markers = []
+        self.wrap_period = None  # e.g. 360 for principal phase in degrees
         self.empty_message = 'Aguardando amostras...'
         self.setMouseTracking(True)
 
@@ -155,11 +156,17 @@ class ChannelCanvas(QWidget):
         painter.setClipRect(rect)
         painter.setPen(QPen(QColor(self.color), 1.4))
         points = QPolygonF()
+        previous = None
         for i in envelope_indices(self.values, max(1, int(rect.width()))):
-            if not np.isfinite(self.values[i]):
+            # A wrapped phase (±180°) splits the curve instead of a vertical segment.
+            if not np.isfinite(self.values[i]) or (self.wrap_period and previous is not None
+                                                   and abs(self.values[i]-previous) > self.wrap_period/2):
                 painter.drawPolyline(points)
                 points = QPolygonF()
-                continue
+                previous = None
+                if not np.isfinite(self.values[i]):
+                    continue
+            previous = self.values[i]
             points.append(QPointF(left + (self.times[i] - x0) / (x1 - x0) * rect.width(),
                                   bottom - (self.values[i] - y0) / (y1 - y0) * rect.height()))
         painter.drawPolyline(points)

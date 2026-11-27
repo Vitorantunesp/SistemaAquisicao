@@ -19,6 +19,7 @@ class ModalUiTests(unittest.TestCase):
         try:
             window.connect_device()
             self.wait(lambda: not window.busy)
+            window.automatic.setChecked(False)
             window.fields['duration'].setValue(.5)
             window.temperature.setText('24,5')
             # Noncontiguous hardware channels must follow the configured sensor order.
@@ -68,13 +69,13 @@ class ModalUiTests(unittest.TestCase):
                 window.apply_trigger_settings(25, 'Negativo', .004)
                 self.assertEqual(ModalSession.load(session.directory).config.threshold, 25)
                 window.capture.arm('P1')
-                with patch('ads1800_app.ui.modal.QApplication.beep') as beep:
+                with patch('ads1800_app.ui.modal.sounds.play') as beep:
                     window.announce_ready()
                     beep.assert_not_called()
                     window.capture.feed(np.arange(30)/1000, np.zeros(30), np.zeros(30))
                     window.announce_ready()
                     window.announce_ready()
-                    beep.assert_called_once()
+                    beep.assert_called_once_with('ready')
                 window.capture.cancel()
                 data = np.zeros((c.n, 3))
                 data[:, 0] = np.arange(c.n)/1000
@@ -94,6 +95,49 @@ class ModalUiTests(unittest.TestCase):
                 self.assertEqual(window.tabs.currentIndex(), 0)
             finally:
                 window.close()
+
+    def test_automatic_mode_accepts_rejects_advances_points_and_finishes(self):
+        window = ModalApp()
+        errors = []
+        window.error = errors.append
+        try:
+            self.assertEqual(window.ip.text(), '192.168.1.181')
+            self.assertTrue(window.automatic.isChecked())
+            window.connect_device()
+            self.wait(lambda: not window.busy)
+            window.fields['duration'].setValue(.5)
+            window.averages.setValue(2)
+            window.points.setPlainText('P1; 0.1; 0.25\nP2; 0.5; 0.25')
+            played = []
+            real_capture = ModalSession.capture
+            calls = []
+            def capture(session, point, data):
+                record, analysis = real_capture(session, point, data)
+                calls.append(point)
+                if len(calls) == 2:
+                    record['issues'] = ['Possível impacto duplo (simulado)']
+                return record, analysis
+            with tempfile.TemporaryDirectory() as folder, \
+                 patch('ads1800_app.ui.modal.sounds.play', side_effect=played.append), \
+                 patch.object(ModalSession, 'capture', capture), \
+                 patch('ads1800_app.ui.modal.QFileDialog.getExistingDirectory', return_value=folder):
+                window.start()
+                self.wait(lambda: not window.busy and window.capture is not None and window.capture.armed)
+                self.assertEqual(window.point.currentText(), 'P1')
+                self.wait(lambda: window.session.records and all(r['status'] != 'pendente' for r in window.session.records)
+                          and window.accepted_count('P2') == 2 and not window.busy, timeout=40)
+                statuses = [(r['point'], r['status']) for r in window.session.records]
+                self.assertEqual(statuses, [('P1', 'aceita'), ('P1', 'rejeitada'), ('P1', 'aceita'),
+                                            ('P2', 'aceita'), ('P2', 'aceita')])
+                cues = [p for p in played if p != 'ready']
+                self.assertEqual(cues, ['success', 'failure', 'point', 'success', 'finished'])
+                self.assertIn('Ensaio concluído', window.status.text())
+                self.wait(lambda: not window.controller.running)
+                self.assertIsNone(window.pending)
+                self.assertFalse(errors, errors)
+        finally:
+            window.close()
+            self.wait(lambda: window.backend is None)
 
     @classmethod
     def setUpClass(cls):
@@ -121,6 +165,7 @@ class ModalUiTests(unittest.TestCase):
             window.connect_device()
             self.wait(lambda: not window.busy)
             self.assertIsNotNone(window.backend)
+            window.automatic.setChecked(False)
             window.fields['duration'].setValue(.5)
             with tempfile.TemporaryDirectory() as directory:
                 settings_path = Path(directory)/'config.json'

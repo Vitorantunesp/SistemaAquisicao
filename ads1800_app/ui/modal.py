@@ -20,7 +20,8 @@ from ads1800_app.backends.lynx import LynxBackend
 from ads1800_app.backends.modal_simulator import ModalSimulatorBackend
 from ads1800_app.config import ADS1800_SAMPLE_RATES, ExperimentConfig
 from ads1800_app.controller import AcquisitionController
-from ads1800_app.modal import ModalConfig, ImpactCapture, ModalSession, ensemble, processed_signals, acceleration_psd
+from ads1800_app.modal import (ModalConfig, ImpactCapture, ModalSession, ensemble, processed_signals,
+                               acceleration_psd, reliable_phase_bins)
 from ads1800_app.monitor_signal import StreamingBandpass
 from ads1800_app.ui.plots import ChannelCanvas, DisplayBuffer
 from ads1800_app.ui.modal_post import PostPanel
@@ -30,6 +31,16 @@ from ads1800_app.ui.modal_setup import ModalSetupDialog
 from ads1800_app.ui.modal_navigation import ModalNavigation
 from ads1800_app.ui.modal_configuration import build_settings, populate_channel_info
 from ads1800_app.ui.modal_style import modal_font
+from ads1800_app.ui import sounds
+
+
+# Acquisition values edited in the form and determined by the assistant.
+SETUP_FORM_KEYS = ('sample_rate', 'duration', 'pretrigger', 'threshold', 'polarity', 'force_window',
+                   'response_window', 'force_width', 'exponential_end', 'bandpass_enabled', 'low_cut',
+                   'high_cut', 'force_channel', 'response_channel', 'force_factor', 'response_factor')
+# Values without widgets, supplied by the confirmed assistant study.
+SETUP_HIDDEN_KEYS = ('double_hit_gap', 'analysis_band', 'trigger_offset', 'rearm_noise_limits', 'quiet_duration')
+SETUP_KEYS = SETUP_FORM_KEYS+SETUP_HIDDEN_KEYS
 
 
 class Geometry(QWidget):
@@ -126,14 +137,13 @@ class ModalApp(QMainWindow):
 
     @staticmethod
     def setup_signature(config):
-        values = asdict(config)
-        # Physical limits are checked again on connection. These other values
-        # have no editable widgets and are supplied by the confirmed study.
-        for key in ('force_limits', 'response_limits', 'analysis_band', 'trigger_offset',
-                    'rearm_noise_limits', 'quiet_duration'):
-            values.pop(key, None)
-        for sensor in values['additional_accelerometers']:
-            sensor.pop('limits', None)
+        """Acquisition values shown in the form that the assistant determined.
+
+        Geometry, target averages and temperature are not part of it: editing
+        them after applying the assistant keeps the confirmed acquisition.
+        """
+        values = {key: getattr(config, key) for key in SETUP_FORM_KEYS}
+        values['sensors'] = [(s['name'], s['channel'], s['factor']) for s in config.additional_accelerometers]
         return json.dumps(values, sort_keys=True)
 
     def configure_by_impacts(self):
@@ -178,6 +188,13 @@ class ModalApp(QMainWindow):
         self.reject_button = self.button('Rejeitar batida', lambda: self.review(False), row)
         self.stop_button = self.button('Parar aquisição', self.stop, row)
         layout.addLayout(row)
+        self.automatic = QCheckBox('Modo automático: aceitar batidas sem alerta, avisar por som e avançar de ponto')
+        self.automatic.setChecked(True)
+        self.automatic.setToolTip('Sem alerta: salva e aceita (dois tons). Com alerta: salva como rejeitada (tom grave) '
+                                  'e espera repetir. Meta do ponto atingida: três tons e próximo ponto. '
+                                  'Todos os pontos: sequência longa e fim do ensaio.')
+        self.automatic.toggled.connect(self.automatic_toggled)
+        layout.addWidget(self.automatic)
         self.status = QLabel('Inicie um ensaio na configuração.')
         frf_row = QHBoxLayout()
         frf_row.addWidget(QLabel('Visualização da FRF:'))
@@ -335,8 +352,11 @@ class ModalApp(QMainWindow):
                         rearm_noise_limits=(), trigger_offset=0)
         c.validate()
         if not for_setup and self.setup_study and self.setup_signature(c) == self.setup_form_signature:
-            # Preserve the exact confirmed values despite display rounding.
-            return ModalConfig.from_dict(json.loads(json.dumps(asdict(self.setup_study.recommendation.config))))
+            # Preserve the exact confirmed acquisition values despite display
+            # rounding; geometry, averages and temperature come from the form.
+            confirmed = ModalConfig.from_dict(json.loads(json.dumps(asdict(self.setup_study.recommendation.config))))
+            c = replace(c, **{key: getattr(confirmed, key) for key in SETUP_KEYS})
+            c.validate()
         return c
 
     def preview_geometry(self):
@@ -432,8 +452,9 @@ class ModalApp(QMainWindow):
     def start(self):
         try:
             c = self.read_config(True)
-            if self.setup_study and not self.setup_study.matches(c):
-                raise ValueError('A configuração foi alterada após a confirmação. Repita o assistente ou escolha Usar configuração manual.')
+            if self.setup_study and not self.setup_study.matches(c, SETUP_KEYS):
+                raise ValueError('Parâmetros de aquisição alterados após o assistente (taxa, duração, trigger, janelas, '
+                                 'filtro ou canais). Repita o assistente ou escolha Usar configuração manual.')
             directory = QFileDialog.getExistingDirectory(self, 'Pasta para o novo ensaio')
             if not directory:
                 return
@@ -474,6 +495,9 @@ class ModalApp(QMainWindow):
                 self.lost = self.backend.samples_lost()
                 self.tabs.setCurrentIndex(1)
                 self.status.setText('Selecione o ponto e arme o trigger. Cada batida aguarda aceitação ou rejeição.')
+                if self.automatic.isChecked():
+                    self.point.setCurrentText(self.next_point() or c.points[0][0])
+                    self.arm()
             self.work(lambda: self.controller.start(config), started)
         except Exception as exc:
             self.error(exc)
@@ -493,8 +517,69 @@ class ModalApp(QMainWindow):
     def announce_ready(self):
         if self.capture and self.capture.ready and not self.ready_announced:
             self.ready_announced = True
-            QApplication.beep()
-            self.status.setText('Pronto — pode realizar a batida no ponto '+self.capture.point+'.')
+            sounds.play('ready')
+            prefix = getattr(self, 'auto_notice', '')
+            self.auto_notice = ''
+            point = self.capture.point
+            count = f' ({self.accepted_count(point)}/{self.session.config.averages} aceitas)' if self.session else ''
+            self.status.setText((prefix+' ' if prefix else '')+f'Pronto — pode realizar a batida no ponto {point}{count}.')
+
+    def accepted_count(self, point):
+        return sum(1 for r in self.session.records if r['point'] == point and r['status'] == 'aceita')
+
+    def next_point(self, current=None):
+        """First point, in order after ``current``, still below the target of accepted hits."""
+        names = [p[0] for p in self.session.config.points]
+        start = names.index(current)+1 if current in names else 0
+        for name in names[start:]+names[:start]:
+            if self.accepted_count(name) < self.session.config.averages:
+                return name
+        return None
+
+    def automatic_toggled(self, checked):
+        if checked and self.pending is not None and self.session and self.session.records and \
+                self.pending is self.session.records[-1] and self.pending['status'] == 'pendente':
+            self.auto_review()
+        elif checked and self.capture and self.controller and self.controller.running and \
+                not self.capture.armed and self.pending is None and not self.busy:
+            self.arm()
+        self.refresh()
+
+    def auto_review(self):
+        """Accept a hit without alerts, reject one with alerts, then rearm or advance."""
+        record = self.pending
+        point = record['point']
+        accept = not record['issues']
+        self.session.review(record, accept)
+        self.post.invalidate()
+        self.pending = None
+        self.update_history()
+        self.results()
+        target = self.session.config.averages
+        done = self.accepted_count(point)
+        running = bool(self.capture and self.controller and self.controller.running)
+        if not accept:
+            sounds.play('failure')
+            notice = f'Batida rejeitada no ponto {point} ({"; ".join(record["issues"])}); repita.'
+        elif done < target:
+            sounds.play('success')
+            notice = f'Batida aceita no ponto {point} ({done}/{target}).'
+        else:
+            following = self.next_point(point)
+            if following is None:
+                sounds.play('finished')
+                self.status.setText(f'Ensaio concluído: todos os pontos com {target} batidas aceitas. '
+                                    'Resultados salvos; revise no Pós-processamento.')
+                if running:
+                    self.work(self.controller.stop, lambda _: None)
+                return
+            sounds.play('point')
+            notice = f'Ponto {point} concluído ({done}/{target}). Próximo ponto: {following}.'
+            self.point.setCurrentText(following)
+        if running:
+            self.arm()
+        self.auto_notice = notice
+        self.status.setText(notice+' Aguarde o aviso de pronto.')
 
     def apply_trigger_settings(self, threshold, polarity, gap):
         if not self.capture or self.capture.armed or self.pending is not None:
@@ -631,8 +716,10 @@ class ModalApp(QMainWindow):
             self.status.setText('Arquivos do ensaio indisponíveis. Use Sair do ensaio para continuar.')
             return
         f, h1, coh = ensemble(self.session.config, hits)
-        for key, (values, label, fixed) in zip(('frf', 'phase'), frf_components(h1, self.frf_view.currentIndex())):
+        keep = reliable_phase_bins(self.session.config, hits, h1, coh)
+        for key, (values, label, fixed) in zip(('frf', 'phase'), frf_components(h1, self.frf_view.currentIndex(), keep)):
             self.plot_labels[key].setText(f'FRF H1 — {label} × Hz')
+            self.plots[key].wrap_period = 360 if fixed == (-180, 180) else None
             self.plot(key, f, values, fixed)
         self.plot('coherence', f, coh, (0, 1))
         self.progress.setText(f'{point}: {len(hits)} / {self.session.config.averages} batidas aceitas\n'
@@ -747,10 +834,16 @@ class ModalApp(QMainWindow):
                     acceleration = np.column_stack(responses)
                     lost = self.backend.samples_lost()
                     if lost > self.lost:
+                        was_armed = self.capture.armed
                         self.capture.cancel()
                         if self.live_filter:
                             self.live_filter.reset()
                         self.status.setText('Perda de amostras: batida cancelada; rearme o trigger.')
+                        if was_armed and self.automatic.isChecked() and self.pending is None:
+                            sounds.play('failure')
+                            self.lost = lost
+                            self.arm()
+                            self.auto_notice = 'Perda de amostras: batida descartada; repita.'
                     self.lost = lost
                     display_values = self.live_filter.apply([force, *responses]) if self.live_filter else [force, *responses]
                     self.live.append(times, display_values)
@@ -762,6 +855,8 @@ class ModalApp(QMainWindow):
                         self.update_history()
                         self.history.selectRow(len(self.session.records)-1)
                         self.status.setText('Batida salva. Revise os sinais e aceite ou rejeite a captura.')
+                        if self.automatic.isChecked():
+                            self.auto_review()
                     elif self.capture.pending is not None:
                         self.status.setText('Impacto detectado — capturando resposta…')
             except Exception as exc:

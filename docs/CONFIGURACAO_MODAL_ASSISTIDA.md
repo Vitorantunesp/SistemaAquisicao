@@ -1,4 +1,4 @@
-# Configuração do ensaio e assistente com duas batidas
+# Configuração do ensaio e assistente por batidas
 
 Abra `iniciar_modal.bat`. A navegação da esquerda seleciona **Configuração do
 ensaio**, **Monitor de impactos** ou **Pós-processamento**.
@@ -18,32 +18,68 @@ ensaio**, **Monitor de impactos** ou **Pós-processamento**.
 
 ## Fluxo automático do assistente
 
-1. Abra **Assistente por batidas…**. O martelo bruto começa a aparecer no topo.
-   Os ajustes ficam à esquerda. Abaixo, os gráficos mostram a última batida
-   completa: força e sua PSD, aceleração e sua PSD ou coerência.
-   Há medição inicial do ruído de 0,5 s; aguarde o aviso sonoro antes de bater.
-2. Faça a primeira batida no ponto escolhido. A detecção inicial usa 5% da amplitude
-   disponível no canal do martelo, relativa à linha de base, respeitando o ruído.
-   Para um canal bipolar de -500 a +500 N e linha de base zero, o nível é 25 N.
-   Se os limites não estiverem disponíveis, o ruído define a detecção provisória.
+1. Abra **Assistente por batidas…**. O martelo bruto aparece no topo, os ajustes
+   ficam à esquerda e, abaixo, os gráficos mostram a última batida completa:
+   força e sua PSD, aceleração e sua PSD ou coerência. Antes de cada etapa o ruído
+   é medido por 0,5 s; aguarde o aviso de pronto (um tom curto e agudo) antes de bater.
+2. Faça a primeira batida no ponto escolhido. A detecção automática usa **10% da
+   amplitude disponível** no canal do martelo, nunca abaixo de **20× o desvio do
+   ruído**. Para um canal de -500 a +500 N, o nível é 50 N. Em **Detecção da 1ª
+   batida [N]** é possível informar outro valor (Automática = 0). Pulsos de uma
+   ou duas amostras (interferência elétrica) e batidas inválidas são descartados
+   com o tom de falha, e o assistente volta a esperar a primeira batida sozinho.
 3. O programa mede o pico, o contato e o tempo de decaimento no acelerômetro
-   selecionado. O próximo trigger é exatamente **50% do primeiro pico**.
-   A duração inclui pré-trigger e **decaimento acrescido de 5%**.
-4. A aquisição passa à taxa final sugerida e mede novamente o ruído.
-   Após o novo aviso sonoro, faça a segunda batida no mesmo ponto e sentido.
-5. A tabela compara os valores. Pico e decaimento devem variar até **10%**,
-   além de passar pelas verificações de sinal, saturação, duplo impacto e coerência.
-   Havendo consistência, a duração final cobre o mais lento dos dois decaimentos
-   com os mesmos 5% de margem. O trigger permanece em 50% do primeiro pico.
-6. Clique em **Usar configuração confirmada**. Os parâmetros aparecem na terceira
-   aba da configuração. Inicie então o ensaio; as duas batidas do assistente não
-   entram nas médias de medição.
+   selecionado, escolhe a taxa final e passa a ela, medindo novamente o ruído.
+4. Faça as batidas de conferência no mesmo ponto e sentido. **Batidas consistentes**
+   define o total da série, incluindo a primeira (padrão 4). A cada batida soa um
+   tom: dois tons crescentes quando ela entra na série, um tom grave quando é
+   descartada (saturação, duplo impacto, decaimento incompleto ou variação fora
+   da tolerância). Não é preciso clicar nada entre as batidas.
+5. Uma batida entra na série quando o pico varia até **25%** e o decaimento até
+   **10%** em relação às demais (ajustáveis em **Variação máx.**). Uma batida
+   isolada fora do padrão não bloqueia a série: as seguintes formam o grupo sem
+   ela. A tabela mostra cada batida, a variação da série e a coerência.
+6. Com a série completa e a coerência adequada, soa a sequência longa e aparece
+   **OK**. O trigger final é **50% da batida mais fraca** da série; a duração cobre
+   o decaimento mais lento **+5%**; a janela de força cobre o contato mais longo.
+7. Clique em **Usar configuração no ensaio**. Os parâmetros vão para a aba
+   **Parâmetros das batidas**. Depois disso ainda é possível editar geometria,
+   meta de batidas por ponto e temperatura; alterar taxa, duração, trigger, janelas,
+   filtro ou canais exige repetir o assistente ou escolher **Usar configuração
+   manual**. As batidas do assistente não entram nas médias do ensaio.
 
-É possível repetir a segunda batida sem refazer a primeira. Tentativas rejeitadas
-permanecem no diagnóstico. Alterar banda, acelerômetro de referência ou ponto
-invalida a medição; clique em **Recomeçar**. Para inspeção dos registros, troque
-**Última batida** por **Primeira batida** ou **Segunda batida**. O martelo bruto
-do topo permanece ao vivo, independentemente do registro selecionado abaixo.
+**Nova série de conferência** descarta as batidas de conferência (elas permanecem
+no diagnóstico) e mantém a primeira. Alterar banda, acelerômetro, ponto,
+detecção, número de batidas ou tolerâncias invalida a medição; clique em
+**Recomeçar as batidas**. Em **Registro**, escolha **Última batida**, **Primeira
+batida** ou **Última conferência**. O martelo bruto do topo permanece ao vivo.
+
+## Ensaio automático (sem ir ao computador)
+
+Com **Modo automático** marcado no Monitor de impactos (padrão), o ensaio arma o
+trigger sozinho no primeiro ponto incompleto e, a cada batida:
+
+| Situação | Ação | Som |
+| --- | --- | --- |
+| Batida sem alertas | Salva e aceita; rearma o mesmo ponto | Dois tons crescentes |
+| Batida com alerta (duplo impacto, saturação, baixo S/R, resposta sem decair…) | Salva como rejeitada; rearma para repetir | Um tom grave longo |
+| Meta de batidas aceitas do ponto atingida | Passa ao próximo ponto incompleto e rearma | Três tons crescentes |
+| Todos os pontos completos | Encerra a aquisição | Sequência longa |
+
+O aviso de pronto (tom curto e agudo) continua indicando quando bater. Batidas
+rejeitadas ficam salvas e podem ser revistas e aceitas manualmente depois.
+Desmarque o modo automático para voltar à revisão manual de cada batida.
+
+## Detecção de impacto duplo
+
+Cada contato começa acima de 10% do pico e termina abaixo de 3% (histerese), de
+modo que o ruído em torno de um único nível não divide um pulso. Contatos
+separados por menos que o intervalo mínimo (2 ms por padrão, ajustável em
+**Configurar trigger…**) são o mesmo contato. Um contato adicional só é
+considerado impacto duplo quando atinge 10% do pico principal e 5% do seu
+impulso (área). Assim, a oscilação da ponteira e o retorno de polaridade
+oposta não geram falsos alertas, e um segundo contato fraco ou lento é detectado.
+A mensagem informa o atraso e a amplitude relativa do outro contato.
 
 ## Duração, taxa e janelas
 
@@ -106,9 +142,9 @@ Em **Função da resposta**, alterne a PSD da aceleração por **Coerência for�
 aceleração**. A coerência mantém escala linear de 0 a 1, mesmo com PSD em dB.
 A linha tracejada indica o limiar selecionado.
 
-O cálculo usa médias dos autoespectros e do espectro cruzado de duas batidas
-independentes do mesmo ponto. A primeira batida é reamostrada com anti-aliasing
-e ambas são alinhadas pelo trigger final e processadas com o mesmo bloco,
+O cálculo usa médias dos autoespectros e do espectro cruzado das batidas
+independentes da série, no mesmo ponto. A primeira batida é reamostrada com anti-aliasing
+e todas são alinhadas pelo trigger final e processadas com o mesmo bloco,
 pré-trigger e janelas. Não são acrescentadas amostras inventadas para cobrir
 blocos incompletos. Com uma única batida, a coerência fica indisponível.
 
@@ -122,7 +158,7 @@ Saturação, duplo impacto, ponto diferente, blocos incompletos ou janela de for
 que corta o contato impedem a aprovação. A coerência complementa os critérios
 de pico e decaimento, não os substitui. Uma inversão da resposta, por exemplo,
 pode manter pico e decaimento semelhantes e reprovar pela coerência.
-Com apenas duas batidas, essa avaliação é preliminar.
+Com mais batidas na série, a coerência fica mais representativa.
 
 ## Dados e validação
 
@@ -135,7 +171,7 @@ a mediana, a parcela aprovada e os motivos de rejeição.
 
 Uma modificação nos parâmetros principais invalida a confirmação anterior.
 Repita o assistente ou selecione **Usar configuração manual**. Desconectar obriga
-a reler os canais e repetir a confirmação. Duas batidas consistentes verificam
+a reler os canais e repetir a confirmação. A série de batidas consistentes verifica
 esta configuração; não garantem excitação e observabilidade de todos os modos.
 
 Os testes verificam navegação, atribuição e posições de canais, fluxo automático,

@@ -10,6 +10,7 @@ import uuid
 import numpy as np
 from scipy.signal import butter, sosfilt
 from ads1800_app.monitor_signal import validate_bandpass
+from ads1800_app.frf_phase import excitation_mask, reliable_bins, unwrap_deg
 
 
 @dataclass
@@ -287,6 +288,54 @@ def hit_spectra(c, force, acceleration):
     return np.fft.rfft(f*wf), np.fft.rfft(a*wa), f*wf, a*wa
 
 
+def detect_contacts(force, fs, gap, noise=0.0, *, min_peak=.1, min_impulse=.05):
+    """Hammer contacts in a baseline-removed force record.
+
+    A contact starts above 10% of the peak and ends below 3% (hysteresis), so
+    noise around one level does not split a pulse. Pulses separated by less
+    than ``gap`` are one contact (tip chatter). A further contact must reach
+    ``min_peak`` of the main peak and ``min_impulse`` of its impulse (area):
+    narrow ringing or opposite-polarity undershoot is not a new contact,
+    while a weaker but real second hit, even a slow one, is reported.
+    """
+    f = np.asarray(force, float)
+    if not len(f):
+        return []
+    sign = 1 if f[np.argmax(abs(f))] >= 0 else -1
+    level = sign*f
+    peak = float(np.max(level))
+    if peak <= 0:
+        return []
+    start_level = max(.1*peak, 8*noise, 1e-12)
+    end_level = max(.03*peak, 4*noise, 1e-12)
+    pulses, start = [], None
+    for i, value in enumerate(level):
+        if start is None and value >= start_level:
+            start = i
+            # Include the rising edge that precedes the start level.
+            while start > 0 and level[start-1] > end_level:
+                start -= 1
+        elif start is not None and value < end_level:
+            pulses.append([start, i])
+            start = None
+    if start is not None:
+        pulses.append([start, len(level)])
+    gap_samples = max(1, math.ceil(gap*fs))
+    merged = []
+    for pulse in pulses:
+        if merged and pulse[0]-merged[-1][1] < gap_samples:
+            merged[-1][1] = pulse[1]
+        else:
+            merged.append(pulse)
+    contacts = [dict(start=a, end=b, peak=float(np.max(level[a:b])),
+                     impulse=float(np.sum(np.clip(level[a:b], 0, None)))/fs) for a, b in merged]
+    if not contacts:
+        return []
+    main = max(contacts, key=lambda p: p['peak'])
+    return [p for p in contacts if p is main or
+            (p['peak'] >= min_peak*main['peak'] and p['impulse'] >= min_impulse*main['impulse'])]
+
+
 def analyze_hit(c, data):
     if data.shape != (c.n, 3) or not np.isfinite(data).all():
         raise ValueError('Registro incompleto ou inválido.')
@@ -298,27 +347,14 @@ def analyze_hit(c, data):
     issues = []
     peak = float(np.max(abs(f)))
     noise = float(np.std(f[:baseline]))
-    # Require a quiet interval between same-polarity contacts. Short threshold
-    # dips and opposite-polarity ringing are not new hammer contacts.
-    sign = 1 if f[np.argmax(abs(f))] >= 0 else -1
-    level = sign*f[c.pre:]
-    contact_level = max(.2*peak, 6*noise, 1e-12)
-    quiet_level = max(.05*peak, 3*noise, 1e-12)
-    gap_samples = max(1, math.ceil(c.double_hit_gap*c.sample_rate))
-    contacts, quiet, separated = 0, 0, True
-    for value in level:
-        if abs(value) <= quiet_level:
-            quiet += 1
-            if quiet >= gap_samples:
-                separated = True
-        else:
-            if value >= contact_level:
-                if separated:
-                    contacts += 1
-                    separated = False
-            quiet = 0
-    if contacts > 1:
-        issues.append(f'Possível impacto duplo ({contacts} contatos; separação mínima {c.double_hit_gap*1000:g} ms)')
+    contacts = detect_contacts(f, c.sample_rate, c.double_hit_gap, noise)
+    if len(contacts) > 1:
+        main = max(contacts, key=lambda p: p['peak'])
+        other = max((p for p in contacts if p is not main), key=lambda p: p['peak'])
+        delay = abs(other['start']-main['start'])/c.sample_rate*1000
+        issues.append(f'Possível impacto duplo ({len(contacts)} contatos; outro contato a {delay:.1f} ms '
+                      f'com {other["peak"]/max(main["peak"], 1e-30):.0%} do pico; separação mínima '
+                      f'{c.double_hit_gap*1000:g} ms)')
     snr = float(20*np.log10(max(peak, 1e-30)/max(noise, 1e-15)))
     if snr < 20:
         issues.append('Força com baixo sinal/ruído (<20 dB)')
@@ -384,6 +420,17 @@ def ensemble(c, hits):
     if len(hits) >= 2:
         coherence[valid] = np.clip(abs(af[valid])**2/(ff[valid]*aa[valid]), 0, 1)
     return freq, h1, coherence
+
+
+def reliable_phase_bins(c, hits, h1, coherence):
+    """Bins where the H1 phase is meaningful: excited by the hammer and coherent.
+
+    Only display and the unwrapped column use this; H1 itself is unchanged.
+    """
+    if not hits:
+        return np.zeros(len(h1), bool)
+    force = spectral_densities(c, hits)[0]
+    return reliable_bins(h1, coherence, excitation=excitation_mask(force, valid=np.isfinite(h1)))
 
 
 class ModalSession:
@@ -470,7 +517,8 @@ class ModalSession:
         previous = record['status']
         record['status'] = 'aceita' if accept else 'rejeitada'
         try:
-            spectra = [ensemble(self.config, self.hits(record['point'], i)) for i in range(len(self.config.sensors))]
+            hits = [self.hits(record['point'], i) for i in range(len(self.config.sensors))]
+            spectra = [ensemble(self.config, h) for h in hits]
             self.save_manifest()
         except Exception:
             record['status'] = previous
@@ -479,6 +527,9 @@ class ModalSession:
         index = [p[0] for p in self.config.points].index(record['point']) + 1
         for i, (freq, h1, coherence) in enumerate(spectra):
             suffix = '' if i == 0 else f'_acelerometro_{i+1}'
+            # Appended column: unwrapped only where excited and coherent (NaN elsewhere).
+            unwrapped = unwrap_deg(h1, reliable_phase_bins(self.config, hits[i], h1, coherence))
             np.savetxt(self.directory/f'frf_ponto_{index}{suffix}.csv',
-                       np.column_stack([freq, h1.real, h1.imag, abs(h1), np.angle(h1, deg=True), coherence]),
-                       delimiter=';', header='Hz;H1_real_m_s2_N;H1_imag_m_s2_N;H1_modulo_m_s2_N;fase_graus;coerencia', comments='')
+                       np.column_stack([freq, h1.real, h1.imag, abs(h1), np.angle(h1, deg=True), coherence, unwrapped]),
+                       delimiter=';', header='Hz;H1_real_m_s2_N;H1_imag_m_s2_N;H1_modulo_m_s2_N;fase_graus;coerencia;'
+                       'fase_desdobrada_graus', comments='')

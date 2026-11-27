@@ -36,6 +36,27 @@ class ModalTests(unittest.TestCase):
         data[c.pre, 2] = 100
         self.assertTrue(any('saturação' in s for s in analyze_hit(c, data)['issues']))
 
+    def test_double_hit_ignores_ringing_and_chatter_but_finds_weak_or_slow_contacts(self):
+        from ads1800_app.modal import detect_contacts
+        fs = 10000
+        t = np.arange(2000)/fs
+        pulse = lambda start, width, amplitude: np.where((t >= start) & (t < start+width),
+            amplitude*np.sin(np.pi*np.clip(t-start, 0, width)/width), 0)
+        single = pulse(.01, .002, 100)
+        self.assertEqual(len(detect_contacts(single, fs, .002)), 1)
+        # Narrow tip ringing after the contact: high peaks, almost no impulse.
+        ringing = single+np.where((t > .0125) & (t < .02), 15*np.sin(2*np.pi*3000*t), 0)
+        self.assertEqual(len(detect_contacts(ringing, fs, .002)), 1)
+        # Chatter: the force dips for 0.5 ms inside the same contact.
+        chatter = pulse(.01, .001, 100)+pulse(.0115, .001, 80)
+        self.assertEqual(len(detect_contacts(chatter, fs, .002)), 1)
+        # A weak (15%) second hit 8 ms later, and a slow, low rebound.
+        self.assertEqual(len(detect_contacts(single+pulse(.02, .002, 15), fs, .002)), 2)
+        self.assertEqual(len(detect_contacts(single+pulse(.02, .01, 12), fs, .002)), 2)
+        # Noise below the start level is not a contact.
+        rng = np.random.default_rng(3)
+        self.assertEqual(len(detect_contacts(single+rng.normal(0, .5, len(t)), fs, .002, .5)), 1)
+
     def config(self, **kwargs):
         return ModalConfig(sample_rate=1000, bandpass_enabled=False, duration=.2, pretrigger=.02, force_width=.01,
                            force_window='Retangular', response_window='Retangular', **kwargs)

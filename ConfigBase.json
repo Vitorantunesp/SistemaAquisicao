@@ -2,7 +2,7 @@
   "name": "Monitoramento da ponte",
   "operator": "",
   "description": "",
-  "device_ip": "192.168.1.180",
+  "device_ip": "192.168.1.181",
   "sample_rate": 1000.0,
   "use_device_timestamp": false,
   "channels": [

@@ -26,10 +26,15 @@ Use a navegação lateral **Configuração do ensaio**, **Monitor de impactos** 
 **Geometria** e **Parâmetros das batidas**.
 O **Assistente por batidas…** mostra o martelo bruto ao vivo no topo, ajustes à
 esquerda e sinais e espectros da última batida abaixo. Regiões verdes mostram
-as janelas. A PSD da aceleração pode ser alternada com a coerência entre as duas
-batidas, que também participa da avaliação da qualidade.
-A primeira batida define trigger de 50% do pico e duração pelo
-decaimento mais 5%; a segunda verifica consistência e coerência. A taxa é a menor opção
+as janelas. A PSD da aceleração pode ser alternada com a coerência entre as
+batidas da série, que também participa da avaliação da qualidade.
+A primeira batida (detectada em 10% da faixa do martelo, ou no valor informado)
+define taxa e bloco; as seguintes, no mesmo ponto, verificam se pico e decaimento
+variam pouco. Com a série completa e coerente, o assistente dá OK e o botão
+**Usar configuração no ensaio** leva trigger (50% da batida mais fraca), duração
+(decaimento mais lento + 5%) e janelas para o ensaio. No **Monitor de impactos**,
+o **Modo automático** aceita ou rejeita cada batida, avisa por som e passa ao
+próximo ponto sem que o operador precise ir ao computador. A taxa é a menor opção
 padrão adequada à banda e o bloco é calculado por `taxa × duração`.
 Os ranges são recomendações para ajuste físico no equipamento. Consulte o
 [guia do assistente](docs/CONFIGURACAO_MODAL_ASSISTIDA.md).
@@ -46,7 +51,7 @@ duração total e frequências em **Configurar trigger…**. Qualquer canal disp
 captura conjunta; ao final, aparecem os escalogramas Morlet complexa. Capturas são
 salvas automaticamente em `dados/capturas/`. O PyWavelets foi adicionado às dependências.
 
-1. Na aba **Conexao**, escolha `ADS 1800 real`, informe o IP e conecte. O endereco padrao documentado pela LYNX e `192.168.1.180`.
+1. Na aba **Conexao**, escolha `ADS 1800 real`, informe o IP e conecte. O campo vem preenchido com `192.168.1.181`, o endereco usado no laboratorio, e pode ser alterado (o padrao de fabrica documentado pela LYNX e `192.168.1.180`).
 2. Na aba **Canais e experimento**, marque os canais que serão lidos. Nomes, unidades e limites vêm do equipamento; passe o mouse sobre a caixa para consultar os limites.
 3. Escolha uma frequencia aceita pelo equipamento. Depois da conexao, a lista e substituida pelas frequencias informadas pelo proprio ADS 1800.
 4. Na aba **Visualizacao e gravacao**, inicie a aquisicao e, quando desejar, a gravacao CSV.

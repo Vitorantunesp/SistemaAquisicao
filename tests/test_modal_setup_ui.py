@@ -106,7 +106,7 @@ class SetupUiTests(unittest.TestCase):
             self.assertTrue(dialog.property_panel.isAncestorOf(dialog.force_window))
             self.assertEqual(dialog.property_panel.horizontalScrollBar().maximum(), 0)
             self.assertLess(max(abs(v) for v in dialog.plots['raw_force'].y_range), 1)
-            self.assertAlmostEqual(dialog.stream_config.threshold, .05*500, delta=.02)
+            self.assertAlmostEqual(dialog.stream_config.threshold, .10*500, delta=.02)
             dialog.sensor.setCurrentIndex(1)
             self.wait(lambda: dialog.phase == 'changed')
             dialog.redraw()
@@ -145,11 +145,14 @@ class SetupUiTests(unittest.TestCase):
                 dialog.show()
                 self.wait(lambda: dialog.study and dialog.study.validated and not dialog.busy and dialog.phase == 'monitor')
                 self.assertEqual(len(dialog.study.pilots), 1)
-                self.assertEqual(len(dialog.study.confirmations), 1)
+                self.assertEqual(dialog.study.required_hits, 4)
+                self.assertEqual(len(dialog.study.series), 4)
+                self.assertGreaterEqual(len(dialog.study.confirmations), 3)
+                self.assertEqual(dialog.results.rowCount(), len(dialog.study.confirmations)+3)
                 self.assertTrue(dialog.apply_button.isEnabled(), dialog.status.text())
                 self.assertTrue(dialog.study.coherence_result['summary']['passed'])
                 rec = dialog.study.recommendation
-                self.assertAlmostEqual(rec.config.threshold, .5*dialog.study.first_metrics['peak_N'])
+                self.assertAlmostEqual(rec.config.threshold, .5*min(h['metrics']['peak_N'] for h in dialog.study.series))
                 self.assertEqual(rec.config.sample_rate, 2000)
                 self.assertLess(rec.config.duration, 8)
                 dialog.redraw()
@@ -221,6 +224,16 @@ class SetupUiTests(unittest.TestCase):
                     window.configure_by_impacts()
                 c = window.read_config(True)
                 self.assertTrue(window.setup_study.matches(c))
+                # Geometry and target averages may change after applying the assistant.
+                window.averages.setValue(5)
+                window.points.setPlainText('P1; 0.1; 0.25\nP2; 0.5; 0.25\nP3; 0.9; 0.25\nP4; 0.7; 0.3')
+                c = window.read_config(True)
+                self.assertEqual((c.averages, len(c.points)), (5, 4))
+                self.assertEqual(c.threshold, dialog.study.recommendation.config.threshold)
+                self.assertFalse(window.setup_study.matches(c))
+                from ads1800_app.ui.modal import SETUP_KEYS
+                self.assertTrue(window.setup_study.matches(c, SETUP_KEYS))
+                window.automatic.setChecked(False)
                 with tempfile.TemporaryDirectory() as folder:
                     with patch('ads1800_app.ui.modal.QFileDialog.getExistingDirectory', return_value=folder):
                         window.start()
@@ -229,9 +242,10 @@ class SetupUiTests(unittest.TestCase):
                     session = window.session
                     manifest = json.loads((session.directory/'session.json').read_text(encoding='utf-8'))
                     self.assertTrue(manifest['acquisition']['modal_setup']['validated'])
-                    self.assertEqual(manifest['acquisition']['modal_setup']['recommendation']['metrics']['strategy'], 'two_hits')
+                    self.assertEqual(manifest['acquisition']['modal_setup']['recommendation']['metrics']['strategy'], 'multiple_hits')
                     self.assertEqual(len(list((session.directory/'configuracao').glob('exploracao_*.npz'))), 1)
-                    self.assertEqual(len(list((session.directory/'configuracao').glob('confirmacao_*.npz'))), 1)
+                    self.assertEqual(len(list((session.directory/'configuracao').glob('confirmacao_*.npz'))),
+                                     len(dialog.study.confirmations))
                     self.assertTrue((session.directory/'configuracao/coerencia.npz').exists())
                     self.assertEqual(len(session.records), 0)
                     window.stop()

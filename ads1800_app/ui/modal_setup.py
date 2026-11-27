@@ -18,13 +18,14 @@ from ads1800_app.modal_setup import SetupSettings, TwoHitStudy, two_hit_metrics
 from ads1800_app.ui.plots import DisplayBuffer
 from ads1800_app.ui.modal_style import modal_font
 from ads1800_app.ui.modal_setup_layout import build_setup_layout
+from ads1800_app.ui import sounds
 
 
 class ModalSetupDialog(QDialog):
     def __init__(self, backend, config, channels, rates, parent=None, *, auto_start=True):
         super().__init__(parent)
         self.setFont(modal_font())
-        self.setWindowTitle('Configuração por duas batidas')
+        self.setWindowTitle('Configuração por batidas')
         self.resize(1460, 960)
         self.backend, self.base, self.channels, self.rates = backend, config, channels, rates
         self.study = self.capture = self.controller = None
@@ -41,7 +42,8 @@ class ModalSetupDialog(QDialog):
         self.updating_windows = False
         self.window_error = False
         build_setup_layout(self)
-        for control in (self.fmin, self.fmax, self.observation):
+        for control in (self.fmin, self.fmax, self.observation, self.detection, self.hits,
+                        self.peak_tolerance, self.decay_tolerance):
             control.valueChanged.connect(self.settings_changed)
         self.sensor.currentIndexChanged.connect(self.settings_changed)
         self.point.currentIndexChanged.connect(self.settings_changed)
@@ -82,7 +84,7 @@ class ModalSetupDialog(QDialog):
                 self.capture.cancel()
             self.capture = None
             self.phase = 'changed'
-            self.status.setText('Banda, canal ou ponto alterado. Clique em Recomeçar para medir novamente.')
+            self.status.setText('Parâmetros do assistente alterados. Clique em Recomeçar para medir novamente.')
         self.redraw()
         self.refresh()
 
@@ -135,7 +137,7 @@ class ModalSetupDialog(QDialog):
             started()
         self._work(start, ready)
 
-    def restart(self):
+    def restart(self, notice=''):
         if self.busy or self.phase in ('closing', 'closed'):
             return
         try:
@@ -143,12 +145,15 @@ class ModalSetupDialog(QDialog):
                 observation_seconds=self.observation.value(), noise_seconds=.5,
                 minimum_hits=1, minimum_points=1, confirmation_hits=1)
             self.study = TwoHitStudy(self.base, self.rates, settings, sensor=self.sensor.currentIndex(),
-                coherence_threshold=self.coherence_threshold.value(), coherence_fraction=self.coherence_fraction.value()/100)
+                coherence_threshold=self.coherence_threshold.value(), coherence_fraction=self.coherence_fraction.value()/100,
+                hits=self.hits.value(), tolerance=self.decay_tolerance.value()/100,
+                peak_tolerance=self.peak_tolerance.value()/100, detection=self.detection.value() or None)
             self.window_error = False
             self.results.setRowCount(0)
-            self.quality_label.setText('Aguardando duas batidas do mesmo ponto.')
-            self.quality_label.setStyleSheet('')
-            self.plan_label.setText('Primeira batida: medir o pico e o decaimento.\nSegunda batida: conferir consistência e coerência.')
+            self.quality_label.setText(notice or f'Aguardando {self.hits.value()} batidas consistentes do mesmo ponto.')
+            self.quality_label.setStyleSheet('color: #b91c1c;' if notice else '')
+            self.plan_label.setText(f'Primeira batida: medir o pico e o decaimento.\nMais {self.hits.value()-1}: '
+                                    'conferir a variação dos parâmetros e a coerência.')
             self.window_hint.setText('Janelamento: aguardando a primeira batida.')
             self.noise_blocks, self.noise_count = [], 0
             c = replace(self.base, sample_rate=self.study.pilot_rate, duration=settings.observation_seconds,
@@ -165,16 +170,24 @@ class ModalSetupDialog(QDialog):
             if self.study.recommendation.blockers:
                 raise ValueError('\n'.join(self.study.recommendation.blockers))
             self.study.reset_confirmation()
-            self.quality_label.setText('Nova conferência em andamento. Aguardando a próxima batida.')
+            self.quality_label.setText(f'Conferência em andamento: faltam {self.study.missing_hits()} batidas consistentes.')
             self.quality_label.setStyleSheet('color: #92400e;')
             self.noise_blocks, self.noise_count = [], 0
             result = self.study.recommendation.config
             c = replace(result, duration=max(self.study.settings.observation_seconds, result.duration*1.25),
                         force_window='Retangular', response_window='Retangular', exponential_end=1,
                         rearm_noise_limits=())
-            self._start_stream(c, 'noise_second', lambda: self.status.setText('Primeira batida medida. Conferindo ruído na taxa final; aguarde o aviso para a segunda.'))
+            self._start_stream(c, 'noise_second', lambda: self.status.setText('Primeira batida medida. Conferindo ruído na taxa final; aguarde o aviso para a próxima batida.'))
         except Exception as exc:
             self.fail(exc)
+
+    def new_series(self):
+        """Discard the verification hits (they stay in the diagnostic) and start again."""
+        if self.busy or not self.study or not self.study.recommendation:
+            return
+        self.study.clear_confirmations()
+        self.update_results()
+        self.begin_second()
 
     def _arm(self, second):
         self.stream_config = self.study.confirmation_config() if second else self.study.pilot_config()
@@ -187,7 +200,9 @@ class ModalSetupDialog(QDialog):
             self.backend.impacts_enabled = True
             self.backend.impact_start = float(self.last_time)+max(.5, self.stream_config.quiet_duration+.2)
         threshold = self.stream_config.threshold
-        self.status.setText(f'Aguardando repouso. Detecção da {"segunda" if second else "primeira"} batida: {threshold:.4g} N.')
+        which = (f'batida de conferência {len(self.study.series)+1}/{self.study.required_hits}' if second
+                 else 'primeira batida')
+        self.status.setText(f'Aguardando repouso. Detecção da {which}: {threshold:.4g} N.')
 
     def poll(self):
         for _ in range(100):
@@ -243,8 +258,9 @@ class ModalSetupDialog(QDialog):
             result = self.capture.feed(t, values[:, 0], values[:, 1:])
             if self.capture.ready and not self.ready_announced:
                 self.ready_announced = True
-                QApplication.beep()
-                self.status.setText('Pronto — faça a segunda batida no mesmo ponto.' if self.phase == 'second' else
+                sounds.play('ready')
+                self.status.setText(f'Pronto — faça a próxima batida no mesmo ponto (faltam {self.study.missing_hits()}).'
+                                    if self.phase == 'second' else
                                     'Pronto — faça a primeira batida. O pico e o decaimento serão medidos automaticamente.')
             if result is None and self.capture.pending is not None:
                 count = len(self.capture.pending)
@@ -264,9 +280,11 @@ class ModalSetupDialog(QDialog):
                 self.capture = None
                 self.phase = 'analyzing'
                 def analyze():
-                    self.controller.stop()
                     if second:
+                        # The final-rate stream keeps running between
+                        # verification hits; only the first hit changes rate.
                         return self.study.add_confirmation(point, data, actual)
+                    self.controller.stop()
                     record = self.study.add_pilot(point, data, actual)
                     if record['accepted']:
                         self.study.suggest()
@@ -274,18 +292,28 @@ class ModalSetupDialog(QDialog):
                 def analyzed(record):
                     self.update_results()
                     if second:
-                        self.phase = 'finished'
-                        self.status.setText('Duas batidas consistentes. A configuração está pronta para uso.' if self.study.validated else
-                                            'A segunda batida não confirmou a primeira: '+' '.join(record['issues']))
-                        # Continue displaying raw acquisition after comparison.
-                        self._start_stream(actual, 'monitor', lambda: None)
+                        if self.study.validated:
+                            self.phase = 'monitor'
+                            sounds.play('finished')
+                            self.status.setText(f'OK — {self.study.required_hits} batidas consistentes. '
+                                                'Clique em “Usar configuração no ensaio”.')
+                            return
+                        sounds.play('success' if record['accepted'] else 'failure')
+                        result = ('Batida aceita.' if record['accepted'] else
+                                  'Batida não considerada: '+' '.join(record['issues']))
+                        self._arm(True)
+                        self.status.setText(f'{result} Faltam {self.study.missing_hits()} batidas consistentes; '
+                                            'aguarde o aviso de pronto.')
                     elif not record['accepted']:
-                        self.phase = 'needs_restart'
-                        self.status.setText('Primeira batida inválida: '+' '.join(record['issues'])+' Recomece para repetir.')
+                        # A false trigger or bad first hit: listen again automatically.
+                        sounds.play('failure')
+                        self.restart('Primeira batida inválida: '+' '.join(record['issues'])+' Repita a batida.')
                     elif self.study.recommendation.blockers:
+                        sounds.play('failure')
                         self.phase = 'needs_restart'
                         self.status.setText(' '.join(self.study.recommendation.blockers))
                     else:
+                        sounds.play('success')
                         self.begin_second()
                 self._work(analyze, analyzed)
 
@@ -293,38 +321,60 @@ class ModalSetupDialog(QDialog):
         if not self.study or not self.study.recommendation:
             return
         rec = self.study.recommendation
-        first = self.study.first_metrics
-        second = self.study.confirmations[-1]['metrics'] if self.study.confirmations else None
-        delta = self.study.confirmations[-1]['variations'] if self.study.confirmations else {}
+        study = self.study
         number = lambda x: '—' if x is None else f'{x:.5g}'
-        variation = lambda key: '—' if delta.get(key) is None else f'{delta[key]:.1%}'
-        rows = [
-            ('Pico da força [N]', number(first['peak_N']), number(second['peak_N']) if second else 'Aguardando', variation('peak')),
-            ('Decaimento da aceleração [s]', number(first['decay_s']), number(second['decay_s']) if second else 'Aguardando', variation('decay')),
-            ('Contato do martelo [s]', number(first['contact_s']), number(second['contact_s']) if second else '—', variation('contact'))]
+        in_series = lambda h: any(h is s for s in study.series) and len(study.series) >= 2
+        rows = []
+        records = study.pilots[:1]+study.confirmations
+        for i, h in enumerate(records):
+            m = h['metrics']
+            name = '1ª (exploratória)' if i == 0 else f'{i+1}ª'
+            if i == 0:
+                state = 'Na série' if in_series(h) else 'Referência'
+            elif in_series(h):
+                state = 'Na série ✓'
+            else:
+                state = 'Descartada: '+' '.join(h['issues'])
+            rows.append((name, number(m['peak_N']), number(m['decay_s']),
+                         number(None if m.get('contact_s') is None else 1000*m['contact_s']), state))
+        consistency = study.consistency
+        if consistency:
+            ok = lambda value, limit: '✓' if value <= limit else '✗'
+            rows.append((f"Variação ({consistency['count']}/{study.required_hits})",
+                         f"±{consistency['peak']:.1%} {ok(consistency['peak'], study.peak_tolerance)}",
+                         f"±{consistency['decay']:.1%} {ok(consistency['decay'], study.tolerance)}",
+                         f"±{consistency['contact']:.1%}",
+                         f'limites: pico {study.peak_tolerance:.0%}, decaimento {study.tolerance:.0%}'))
         quality = rec.metrics.get('coherence_quality', {})
         fraction = quality.get('fraction_above')
-        rows.append(('Coerência da configuração', 'Duas batidas independentes',
-                     number(quality.get('median')), 'Aguardando segunda batida' if fraction is None else
-                     f"{fraction:.0%} ≥ {self.study.coherence_threshold:.2f}"))
+        rows.append(('Coerência', number(quality.get('median')), '', '',
+                     'Aguardando batidas' if fraction is None else
+                     f"{fraction:.0%} da banda ≥ {study.coherence_threshold:.2f}"))
         self.results.setRowCount(len(rows))
         for i, row in enumerate(rows):
             for j, value in enumerate(row):
                 self.results.setItem(i, j, QTableWidgetItem(value))
+        self.results.scrollToBottom()
         self.plan_label.setText(f'Taxa: {rec.config.sample_rate:g} Hz\nBloco: {rec.config.n} amostras · {rec.config.duration:.5g} s\n'
-                                f'Pré-trigger: {rec.config.pretrigger:.5g} s\nTrigger: {rec.config.threshold:.5g} N (50% do primeiro pico)\n'
+                                f'Pré-trigger: {rec.config.pretrigger:.5g} s\nTrigger: {rec.config.threshold:.5g} N '
+                                '(50% da batida mais fraca)\n'
                                 f'Δf: {rec.config.sample_rate/rec.config.n:.4g} Hz')
-        text = ('Coerência adequada. ' if quality.get('passed') else '')
+        if study.validated:
+            text = f'OK: {study.required_hits} batidas consistentes e coerência adequada. '
+        else:
+            text = f'Faltam {study.missing_hits()} batidas consistentes. ' if study.missing_hits() else ''
+            text += ('Coerência adequada. ' if quality.get('passed') else '')
         if fraction is not None:
             text += f"{fraction:.0%} da banda avaliável ≥ {quality['threshold']:.2f}. "
         text += ' '.join(quality.get('reasons', []))
-        text += '\nAvaliação preliminar com duas batidas; frequências sem sinal suficiente são excluídas.'
+        text += '\nFrequências sem sinal suficiente são excluídas da coerência.'
         self.quality_label.setText(text)
-        self.quality_label.setStyleSheet('color: #15803d;' if quality.get('passed') else 'color: #92400e;')
+        self.quality_label.setStyleSheet('color: #15803d;' if study.validated else 'color: #92400e;')
         self.populate_window_controls()
         ranges = '; '.join(f"{r['name']}: ±{r['recommended_max']:.3g} {r['unit']}" for r in rec.ranges)
-        self.rate_hint.setText(f'Detecção inicial: {rec.metrics["initial_detection_N"]:.4g} N (5% da amplitude de entrada, quando informada). '
-                               f'Consistência: pico e decaimento até {self.study.tolerance:.0%}. Ranges recomendados: {ranges}. Ajuste físico na aquisição.')
+        self.rate_hint.setText(f'Detecção inicial: {rec.metrics["initial_detection_N"]:.4g} N. '
+                               f'Consistência: pico até {study.peak_tolerance:.0%} e decaimento até {study.tolerance:.0%}. '
+                               f'Ranges recomendados: {ranges}. Ajuste físico na aquisição.')
 
     def populate_window_controls(self):
         c = self.study.recommendation.config
@@ -444,7 +494,7 @@ class ModalSetupDialog(QDialog):
                     canvas.thresholds = []
                 canvas.update()
             if self.response_function.currentIndex() == 1:
-                self.plot_labels['acceleration_psd'].setText('Coerência força × aceleração · aguardando duas batidas')
+                self.plot_labels['acceleration_psd'].setText('Coerência força × aceleração · aguardando batidas')
             else:
                 self.plot_labels['acceleration_psd'].setText('PSD da aceleração [(m/s²)²/Hz]')
             self.last_hit_label.setText('Última batida · aguardando impacto')
@@ -485,7 +535,7 @@ class ModalSetupDialog(QDialog):
             result = self.study.coherence_result
             canvas = self.plots['acceleration_psd']
             canvas.thresholds = [self.coherence_threshold.value()]
-            self.plot_labels['acceleration_psd'].setText('Coerência força × aceleração · duas batidas do mesmo ponto')
+            self.plot_labels['acceleration_psd'].setText('Coerência força × aceleração · batidas da série, mesmo ponto')
             if result and np.isfinite(result['coherence']).any():
                 self._plot(canvas, result['frequency'], result['coherence'], x_range=(self.fmin.value(), self.fmax.value()))
             else:
@@ -495,7 +545,7 @@ class ModalSetupDialog(QDialog):
             canvas.update()
 
     def export(self):
-        directory = QFileDialog.getExistingDirectory(self, 'Salvar diagnóstico das duas batidas')
+        directory = QFileDialog.getExistingDirectory(self, 'Salvar diagnóstico das batidas')
         if directory:
             try:
                 target = Path(directory)/f'configuracao_modal_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}'
@@ -518,7 +568,8 @@ class ModalSetupDialog(QDialog):
     def refresh(self):
         available = not self.busy
         self.restart_button.setEnabled(available)
-        for control in (self.fmin, self.fmax, self.observation, self.sensor, self.point):
+        for control in (self.fmin, self.fmax, self.observation, self.sensor, self.point, self.detection,
+                        self.hits, self.peak_tolerance, self.decay_tolerance):
             control.setEnabled(available and self.phase not in ('first', 'second', 'analyzing'))
         has_rec = bool(self.study and self.study.recommendation)
         editable = available and self.phase in ('idle', 'monitor', 'finished', 'needs_restart')
@@ -529,7 +580,7 @@ class ModalSetupDialog(QDialog):
         self.force_width.setEnabled(editable and has_rec and self.force_window.currentText() == 'Força')
         self.exponential_end.setEnabled(editable and has_rec and self.response_window.currentText() == 'Exponencial')
         self.retry_button.setEnabled(available and has_rec and not self.study.recommendation.blockers and
-                                     self.phase in ('monitor', 'finished', 'error'))
+                                     self.phase in ('monitor', 'finished', 'error', 'second'))
         self.export_button.setEnabled(available and has_rec)
         self.apply_button.setEnabled(available and not self.window_error and bool(self.study and self.study.validated))
 

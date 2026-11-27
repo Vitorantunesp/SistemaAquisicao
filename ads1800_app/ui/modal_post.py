@@ -14,6 +14,7 @@ from ads1800_app.modal_ema import identify_ema, reconstruct_ema
 from ads1800_app.ui.stabilization import StabilizationCanvas
 from ads1800_app.ui.plots import ChannelCanvas, envelope_indices
 from ads1800_app.ui.frf_view import FRF_VIEWS, frf_components
+from ads1800_app.frf_phase import PHASE_COHERENCE_MIN, reliable_bins
 
 
 class Comparison(ChannelCanvas):
@@ -35,11 +36,16 @@ class Comparison(ChannelCanvas):
         x0, x1 = self.x_range
         y0, y1 = self.y_range
         points = QPolygonF()
+        previous = None
         for i in envelope_indices(self.model, max(1, int(right-left))):
-            if not np.isfinite(self.model[i]):
+            if not np.isfinite(self.model[i]) or (self.wrap_period and previous is not None
+                                                  and abs(self.model[i]-previous) > self.wrap_period/2):
                 p.drawPolyline(points)
                 points = QPolygonF()
-                continue
+                previous = None
+                if not np.isfinite(self.model[i]):
+                    continue
+            previous = self.model[i]
             points.append(QPointF(left+(self.times[i]-x0)/(x1-x0)*(right-left),
                                   bottom-(self.model[i]-y0)/(y1-y0)*(bottom-top)))
         p.drawPolyline(points)
@@ -462,11 +468,18 @@ class PostPanel(QWidget):
             maximum = min(maximum, self.session.config.high_cut)
         mask = (r['frequency'] >= r['settings']['fmin']) & (r['frequency'] <= maximum)
         x = r['frequency'][mask]
-        measured = frf_components(r['measured'][i, mask], self.frf_view.currentIndex())
-        fitted = frf_components(r['fitted'][i, mask], self.frf_view.currentIndex())
+        view = self.frf_view.currentIndex()
+        measured_h = r['measured'][i, mask]
+        coherence = r.get('coherence')
+        keep = reliable_bins(measured_h, None if coherence is None else coherence[i, mask],
+                             r['settings'].get('min_coherence', PHASE_COHERENCE_MIN))
+        measured = frf_components(measured_h, view, keep)
+        # The fit is continuous: unwrap it everywhere, then align it to the measured curve.
+        fitted = frf_components(r['fitted'][i, mask], view, reference=measured[1][0])
         for canvas, title, (y, label, fixed), (fit, _, _) in zip(
                 (self.comparison, self.comparison_secondary), self.comparison_labels, measured, fitted):
             title.setText(label)
+            canvas.wrap_period = 360 if fixed == (-180, 180) else None
             canvas.times, canvas.values, canvas.model = x, y, fit
             canvas.x_range = (r['settings']['fmin'], maximum)
             valid = np.r_[y[np.isfinite(y)], fit[np.isfinite(fit)]]

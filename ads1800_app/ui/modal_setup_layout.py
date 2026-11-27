@@ -1,7 +1,7 @@
 """Property panel on the left, continuous hammer above, last hit below."""
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QGroupBox, QScrollArea, QLabel, QComboBox, QDoubleSpinBox, QPushButton,
-    QCheckBox, QTableWidget, QHeaderView, QSplitter)
+    QCheckBox, QTableWidget, QHeaderView, QSplitter, QSpinBox)
 from PyQt6.QtCore import Qt
 
 from ads1800_app.ui.plots import ChannelCanvas
@@ -43,14 +43,30 @@ def build_setup_layout(owner):
     owner.sensor.addItems([f"{s['name']} · CH {s['channel']+1}" for s in owner.base.sensors])
     owner.point = QComboBox()
     owner.point.addItems([p[0] for p in owner.base.points])
+    owner.detection = owner.number(0, 0, 1e7)
+    owner.detection.setSpecialValueText('Automática')
+    owner.detection.setToolTip('Força que dispara a primeira batida. Automática: 10% da faixa do martelo, '
+                               'nunca abaixo de 20× o ruído medido.')
+    owner.hits = QSpinBox()
+    owner.hits.setRange(2, 20)
+    owner.hits.setValue(4)
+    owner.hits.setToolTip('Total de batidas consistentes no mesmo ponto, incluindo a primeira.')
+    owner.peak_tolerance = owner.number(25, 1, 100)
+    owner.peak_tolerance.setDecimals(0)
+    owner.peak_tolerance.setSuffix(' %')
+    owner.decay_tolerance = owner.number(10, 1, 50)
+    owner.decay_tolerance.setDecimals(0)
+    owner.decay_tolerance.setSuffix(' %')
     for title, control in [('Frequência mínima [Hz]', owner.fmin), ('Frequência máxima [Hz]', owner.fmax),
                            ('Observação máxima [s]', owner.observation), ('Acelerômetro', owner.sensor),
-                           ('Ponto das batidas', owner.point)]:
+                           ('Ponto das batidas', owner.point), ('Detecção da 1ª batida [N]', owner.detection),
+                           ('Batidas consistentes', owner.hits), ('Variação máx. do pico', owner.peak_tolerance),
+                           ('Variação máx. do decaimento', owner.decay_tolerance)]:
         form.addRow(title, control)
-    owner.restart_button = QPushButton('Recomeçar as duas batidas')
+    owner.restart_button = QPushButton('Recomeçar as batidas')
     owner.restart_button.clicked.connect(owner.restart)
     form.addRow(owner.restart_button)
-    owner.plan_label = QLabel('Primeira batida: medir o pico e o decaimento.\nSegunda batida: conferir a configuração.')
+    owner.plan_label = QLabel('Primeira batida: medir o pico e o decaimento.\nDemais batidas: conferir a variação dos parâmetros.')
     owner.plan_label.setWordWrap(True)
     form.addRow(owner.plan_label)
     quality = _group(left, 'Qualidade por coerência')
@@ -61,7 +77,7 @@ def build_setup_layout(owner):
     owner.coherence_fraction.setSuffix(' %')
     quality.addRow('Coerência mínima', owner.coherence_threshold)
     quality.addRow('Parcela da banda avaliável', owner.coherence_fraction)
-    owner.quality_label = QLabel('Aguardando duas batidas do mesmo ponto.')
+    owner.quality_label = QLabel('Aguardando as batidas do mesmo ponto.')
     owner.quality_label.setWordWrap(True)
     quality.addRow(owner.quality_label)
     win = _group(left, 'Janelamento da última batida')
@@ -82,7 +98,7 @@ def build_setup_layout(owner):
     win.addRow(owner.window_hint)
     display = _group(left, 'Exibição')
     owner.view = QComboBox()
-    owner.view.addItems(['Última batida', 'Primeira batida', 'Segunda batida'])
+    owner.view.addItems(['Última batida', 'Primeira batida', 'Última conferência'])
     owner.psd_mode = QComboBox()
     owner.psd_mode.addItems(['PSD: magnitude', 'PSD: dB'])
     owner.response_function = QComboBox()
@@ -97,7 +113,7 @@ def build_setup_layout(owner):
     display.addRow('Função da resposta', owner.response_function)
     display.addRow('Escala dos espectros', owner.psd_mode)
     display.addRow(owner.force_zoom)
-    owner.rate_hint = QLabel('Detecção inicial em 5% da entrada; trigger sugerido em 50% do pico.')
+    owner.rate_hint = QLabel('Detecção inicial em 10% da entrada; trigger sugerido em 50% da batida mais fraca.')
     owner.rate_hint.setWordWrap(True)
     owner.rate_hint.setStyleSheet('color: #475569; font-size: 11px;')
     left.addWidget(owner.rate_hint)
@@ -139,21 +155,21 @@ def build_setup_layout(owner):
             owner.plots[key], owner.plot_labels[key] = canvas, label
             panels.addLayout(box, row, col)
     right.addLayout(panels, 1)
-    owner.results = QTableWidget(0, 4)
-    owner.results.setHorizontalHeaderLabels(['Parâmetro', 'Primeira / sugestão', 'Segunda', 'Variação / qualidade'])
+    owner.results = QTableWidget(0, 5)
+    owner.results.setHorizontalHeaderLabels(['Batida', 'Pico [N]', 'Decaimento [s]', 'Contato [ms]', 'Situação'])
     owner.results.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
     owner.results.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
     owner.results.verticalHeader().setDefaultSectionSize(24)
     owner.results.verticalHeader().setMinimumSectionSize(24)
-    owner.results.setMinimumHeight(115)
-    owner.results.setMaximumHeight(145)
+    owner.results.setMinimumHeight(140)
+    owner.results.setMaximumHeight(230)
     right.addWidget(owner.results)
     owner.status = QLabel('Iniciando a visualização do martelo bruto…')
     owner.status.setWordWrap(True)
     root.addWidget(owner.status)
     actions = QHBoxLayout()
-    owner.retry_button = QPushButton('Repetir segunda batida')
-    owner.retry_button.clicked.connect(owner.begin_second)
+    owner.retry_button = QPushButton('Nova série de conferência')
+    owner.retry_button.clicked.connect(owner.new_series)
     actions.addWidget(owner.retry_button)
     owner.export_button = QPushButton('Salvar diagnóstico…')
     owner.export_button.clicked.connect(owner.export)
@@ -162,7 +178,7 @@ def build_setup_layout(owner):
     close = QPushButton('Fechar')
     close.clicked.connect(owner.reject)
     actions.addWidget(close)
-    owner.apply_button = QPushButton('Usar configuração confirmada')
+    owner.apply_button = QPushButton('Usar configuração no ensaio')
     owner.apply_button.clicked.connect(owner.accept)
     actions.addWidget(owner.apply_button)
     root.addLayout(actions)

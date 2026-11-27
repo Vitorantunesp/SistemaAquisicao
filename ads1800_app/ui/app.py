@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ads1800_app.backends import LynxBackend, SimulatorBackend
-from ads1800_app.config import ADS1800_SAMPLE_RATES, ChannelConfig, ExperimentConfig
+from ads1800_app.config import ADS1800_SAMPLE_RATES, DEFAULT_DEVICE_IP, ChannelConfig, ExperimentConfig
 from ads1800_app.controller import AcquisitionController
 
 from ads1800_app.ui.plots import PlotDashboard
@@ -76,7 +76,7 @@ class Ads1800App(QMainWindow):
         form = QFormLayout(self.connection_fields)
         self.mode = QComboBox()
         self.mode.addItems(['ADS 1800 real', 'Simulador'])
-        self.ip = QLineEdit('192.168.1.180')
+        self.ip = QLineEdit(DEFAULT_DEVICE_IP)
         form.addRow('Modo', self.mode)
         form.addRow('Endereço IP', self.ip)
         layout.addWidget(self.connection_fields)

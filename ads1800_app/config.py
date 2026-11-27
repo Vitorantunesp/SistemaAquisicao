@@ -5,6 +5,9 @@ import json
 import math
 from pathlib import Path
 
+# Pre-filled, editable device address (the lab ADS 1800 uses .181).
+DEFAULT_DEVICE_IP = "192.168.1.181"
+
 # ADS1800 manual rev. 13, pp. 16-17. Connected hardware takes precedence.
 ADS1800_SAMPLE_RATES = (1, 5, 25, 50, 100, 200, 250, 400, 500, 800,
                        1000, 2000, 4000, 8000, 12000, 24000)
@@ -56,7 +59,7 @@ class ExperimentConfig:
     name: str = "Experimento"
     operator: str = ""
     description: str = ""
-    device_ip: str = "192.168.1.180"
+    device_ip: str = DEFAULT_DEVICE_IP
     sample_rate: float = 1000.0
     use_device_timestamp: bool = False
     channels: list[ChannelConfig] = field(
