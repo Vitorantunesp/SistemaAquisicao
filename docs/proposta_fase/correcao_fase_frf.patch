@@ -1,0 +1,331 @@
+--- a/ads1800_app/frf_phase.py
++++ b/ads1800_app/frf_phase.py
+@@ -0,0 +1,75 @@
++"""Phase presentation of complex FRFs: principal value, reliability and unwrapping.
++
++None of these functions changes the complex H1. They only decide how its angle
++is shown, so that noise near ±180° or bins without excitation do not appear as
++spurious phase jumps.
++"""
++import numpy as np
++
++# Defaults for the acquisition view; post-processing passes its own coherence limit.
++PHASE_COHERENCE_MIN = .8
++EXCITATION_DROP_DB = 20.0
++
++
++def principal_deg(h):
++    """Principal angle in degrees, (−180, 180]. NaN bins stay NaN."""
++    return np.angle(np.asarray(h, complex), deg=True)
++
++
++def excitation_mask(force_autospectrum, drop_db=EXCITATION_DROP_DB, valid=None):
++    """Bins whose force autospectrum is within ``drop_db`` of its in-band maximum.
++
++    An impact hammer rolls off (and a half-sine pulse has nulls) above the
++    frequency set by the contact time. Outside this useful band, H1 is the ratio
++    of two noise spectra and its phase is random.
++    """
++    gff = np.asarray(force_autospectrum, float)
++    usable = np.isfinite(gff) & (gff > 0)
++    if valid is not None:
++        usable &= np.asarray(valid, bool)
++    if not usable.any():
++        return usable
++    reference = float(np.max(gff[usable]))
++    return usable & (gff >= reference*10**(-drop_db/10))
++
++
++def reliable_bins(h, coherence=None, coherence_min=PHASE_COHERENCE_MIN, excitation=None):
++    """Finite bins with enough coherence (when available) and excitation."""
++    keep = np.isfinite(np.asarray(h, complex))
++    if coherence is not None:
++        coherence = np.asarray(coherence, float)
++        # Coherence is NaN with fewer than two hits: do not reject on it then.
++        if np.isfinite(coherence[keep]).any():
++            keep &= np.nan_to_num(coherence, nan=0) >= coherence_min
++    if excitation is not None:
++        keep &= np.asarray(excitation, bool)
++    return keep
++
++
++def unwrap_deg(h, keep=None):
++    """Continuous phase in degrees over the kept bins; the others are NaN.
++
++    Gaps are bridged by unwrapping the kept bins in sequence, which assumes that
++    the true phase changes by less than 180° across each gap. The curve is then
++    shifted by a multiple of 360° so that its first value lies in (−180, 180].
++    """
++    h = np.asarray(h, complex)
++    keep = np.isfinite(h) if keep is None else np.asarray(keep, bool) & np.isfinite(h)
++    phase = np.full(h.shape, np.nan)
++    if not keep.any():
++        return phase
++    unwrapped = np.unwrap(np.angle(h[keep]))
++    first = np.angle(np.exp(1j*unwrapped[0]))
++    phase[keep] = np.degrees(unwrapped-unwrapped[0]+first)
++    return phase
++
++
++def wrap_breaks(values, period=360.0):
++    """Indices i where values[i-1] → values[i] is a wrap (|Δ| > period/2).
++
++    Plots break the line there instead of drawing a vertical segment.
++    """
++    values = np.asarray(values, float)
++    if len(values) < 2:
++        return np.array([], int)
++    return np.flatnonzero(np.abs(np.diff(values)) > period/2)+1
+--- a/ads1800_app/modal.py
++++ b/ads1800_app/modal.py
+@@ -10,6 +10,7 @@
+ import numpy as np
+ from scipy.signal import butter, sosfilt
+ from ads1800_app.monitor_signal import validate_bandpass
++from ads1800_app.frf_phase import excitation_mask, reliable_bins, unwrap_deg
+ 
+ 
+ @dataclass
+@@ -386,6 +387,17 @@
+     return freq, h1, coherence
+ 
+ 
++def reliable_phase_bins(c, hits, h1, coherence):
++    """Bins where the H1 phase is meaningful: excited by the hammer and coherent.
++
++    Only display and the unwrapped column use this; H1 itself is unchanged.
++    """
++    if not hits:
++        return np.zeros(len(h1), bool)
++    force = spectral_densities(c, hits)[0]
++    return reliable_bins(h1, coherence, excitation=excitation_mask(force, valid=np.isfinite(h1)))
++
++
+ class ModalSession:
+     """Immutable configuration per run; every capture persisted before review."""
+     def __init__(self, directory, config, acquisition_metadata=None):
+@@ -470,7 +482,8 @@
+         previous = record['status']
+         record['status'] = 'aceita' if accept else 'rejeitada'
+         try:
+-            spectra = [ensemble(self.config, self.hits(record['point'], i)) for i in range(len(self.config.sensors))]
++            hits = [self.hits(record['point'], i) for i in range(len(self.config.sensors))]
++            spectra = [ensemble(self.config, h) for h in hits]
+             self.save_manifest()
+         except Exception:
+             record['status'] = previous
+@@ -479,6 +492,9 @@
+         index = [p[0] for p in self.config.points].index(record['point']) + 1
+         for i, (freq, h1, coherence) in enumerate(spectra):
+             suffix = '' if i == 0 else f'_acelerometro_{i+1}'
++            # Appended column: unwrapped only where excited and coherent (NaN elsewhere).
++            unwrapped = unwrap_deg(h1, reliable_phase_bins(self.config, hits[i], h1, coherence))
+             np.savetxt(self.directory/f'frf_ponto_{index}{suffix}.csv',
+-                       np.column_stack([freq, h1.real, h1.imag, abs(h1), np.angle(h1, deg=True), coherence]),
+-                       delimiter=';', header='Hz;H1_real_m_s2_N;H1_imag_m_s2_N;H1_modulo_m_s2_N;fase_graus;coerencia', comments='')
++                       np.column_stack([freq, h1.real, h1.imag, abs(h1), np.angle(h1, deg=True), coherence, unwrapped]),
++                       delimiter=';', header='Hz;H1_real_m_s2_N;H1_imag_m_s2_N;H1_modulo_m_s2_N;fase_graus;coerencia;'
++                       'fase_desdobrada_graus', comments='')
+--- a/ads1800_app/ui/frf_view.py
++++ b/ads1800_app/ui/frf_view.py
+@@ -1,12 +1,33 @@
+ """Display components of a complex accelerance without changing its data."""
+ import numpy as np
+ 
+-FRF_VIEWS = ['Magnitude + Fase', 'Parte real + Fase', 'Parte real + Parte imaginária']
++from ads1800_app.frf_phase import principal_deg, unwrap_deg
+ 
++FRF_VIEWS = ['Magnitude + Fase', 'Parte real + Fase', 'Parte real + Parte imaginária',
++             'Magnitude + Fase desdobrada']
+ 
+-def frf_components(values, view):
+-    first = (np.abs(values), 'Magnitude [(m/s²)/N]', None) if view == 0 else (
++
++def frf_components(values, view, keep=None, reference=None):
++    """Return ((first, label, fixed), (second, label, fixed)) for a view index.
++
++    ``keep`` marks reliable bins (coherence/excitation). The principal phase is
++    shown everywhere, since its wraps are split by the plot; the unwrapped phase
++    uses only kept bins, because unwrapping through noise adds false 360° steps.
++    ``reference`` (an unwrapped measured phase) shifts this curve by a multiple
++    of 360° to overlay it, as for the fitted FRF in post-processing.
++    """
++    values = np.asarray(values, complex)
++    first = (np.abs(values), 'Magnitude [(m/s²)/N]', None) if view in (0, 3) else (
+         np.real(values), 'Parte real [(m/s²)/N]', None)
+-    second = (np.imag(values), 'Parte imaginária [(m/s²)/N]', None) if view == 2 else (
+-        np.angle(values, deg=True), 'Fase [graus]', (-180, 180))
++    if view == 2:
++        second = (np.imag(values), 'Parte imaginária [(m/s²)/N]', None)
++    elif view == 3:
++        phase = unwrap_deg(values, keep)
++        if reference is not None and len(phase):
++            both = np.isfinite(phase) & np.isfinite(reference)
++            if both.any():
++                phase -= 360*np.round(np.median(phase[both]-np.asarray(reference)[both])/360)
++        second = (phase, 'Fase desdobrada [graus]', None)
++    else:
++        second = (principal_deg(values), 'Fase [graus]', (-180, 180))
+     return first, second
+--- a/ads1800_app/ui/modal.py
++++ b/ads1800_app/ui/modal.py
+@@ -20,7 +20,8 @@
+ from ads1800_app.backends.modal_simulator import ModalSimulatorBackend
+ from ads1800_app.config import ADS1800_SAMPLE_RATES, ExperimentConfig
+ from ads1800_app.controller import AcquisitionController
+-from ads1800_app.modal import ModalConfig, ImpactCapture, ModalSession, ensemble, processed_signals, acceleration_psd
++from ads1800_app.modal import (ModalConfig, ImpactCapture, ModalSession, ensemble, processed_signals,
++                               acceleration_psd, reliable_phase_bins)
+ from ads1800_app.monitor_signal import StreamingBandpass
+ from ads1800_app.ui.plots import ChannelCanvas, DisplayBuffer
+ from ads1800_app.ui.modal_post import PostPanel
+@@ -631,8 +632,10 @@
+             self.status.setText('Arquivos do ensaio indisponíveis. Use Sair do ensaio para continuar.')
+             return
+         f, h1, coh = ensemble(self.session.config, hits)
+-        for key, (values, label, fixed) in zip(('frf', 'phase'), frf_components(h1, self.frf_view.currentIndex())):
++        keep = reliable_phase_bins(self.session.config, hits, h1, coh)
++        for key, (values, label, fixed) in zip(('frf', 'phase'), frf_components(h1, self.frf_view.currentIndex(), keep)):
+             self.plot_labels[key].setText(f'FRF H1 — {label} × Hz')
++            self.plots[key].wrap_period = 360 if fixed == (-180, 180) else None
+             self.plot(key, f, values, fixed)
+         self.plot('coherence', f, coh, (0, 1))
+         self.progress.setText(f'{point}: {len(hits)} / {self.session.config.averages} batidas aceitas\n'
+--- a/ads1800_app/ui/modal_post.py
++++ b/ads1800_app/ui/modal_post.py
+@@ -14,6 +14,7 @@
+ from ads1800_app.ui.stabilization import StabilizationCanvas
+ from ads1800_app.ui.plots import ChannelCanvas, envelope_indices
+ from ads1800_app.ui.frf_view import FRF_VIEWS, frf_components
++from ads1800_app.frf_phase import PHASE_COHERENCE_MIN, reliable_bins
+ 
+ 
+ class Comparison(ChannelCanvas):
+@@ -35,11 +36,16 @@
+         x0, x1 = self.x_range
+         y0, y1 = self.y_range
+         points = QPolygonF()
++        previous = None
+         for i in envelope_indices(self.model, max(1, int(right-left))):
+-            if not np.isfinite(self.model[i]):
++            if not np.isfinite(self.model[i]) or (self.wrap_period and previous is not None
++                                                  and abs(self.model[i]-previous) > self.wrap_period/2):
+                 p.drawPolyline(points)
+                 points = QPolygonF()
+-                continue
++                previous = None
++                if not np.isfinite(self.model[i]):
++                    continue
++            previous = self.model[i]
+             points.append(QPointF(left+(self.times[i]-x0)/(x1-x0)*(right-left),
+                                   bottom-(self.model[i]-y0)/(y1-y0)*(bottom-top)))
+         p.drawPolyline(points)
+@@ -462,11 +468,18 @@
+             maximum = min(maximum, self.session.config.high_cut)
+         mask = (r['frequency'] >= r['settings']['fmin']) & (r['frequency'] <= maximum)
+         x = r['frequency'][mask]
+-        measured = frf_components(r['measured'][i, mask], self.frf_view.currentIndex())
+-        fitted = frf_components(r['fitted'][i, mask], self.frf_view.currentIndex())
++        view = self.frf_view.currentIndex()
++        measured_h = r['measured'][i, mask]
++        coherence = r.get('coherence')
++        keep = reliable_bins(measured_h, None if coherence is None else coherence[i, mask],
++                             r['settings'].get('min_coherence', PHASE_COHERENCE_MIN))
++        measured = frf_components(measured_h, view, keep)
++        # The fit is continuous: unwrap it everywhere, then align it to the measured curve.
++        fitted = frf_components(r['fitted'][i, mask], view, reference=measured[1][0])
+         for canvas, title, (y, label, fixed), (fit, _, _) in zip(
+                 (self.comparison, self.comparison_secondary), self.comparison_labels, measured, fitted):
+             title.setText(label)
++            canvas.wrap_period = 360 if fixed == (-180, 180) else None
+             canvas.times, canvas.values, canvas.model = x, y, fit
+             canvas.x_range = (r['settings']['fmin'], maximum)
+             valid = np.r_[y[np.isfinite(y)], fit[np.isfinite(fit)]]
+--- a/ads1800_app/ui/plots.py
++++ b/ads1800_app/ui/plots.py
+@@ -70,6 +70,7 @@
+         self.y_range = (-1, 1)
+         self.x_label = 'Tempo [s]'
+         self.frequency_markers = []
++        self.wrap_period = None  # e.g. 360 for principal phase in degrees
+         self.empty_message = 'Aguardando amostras...'
+         self.setMouseTracking(True)
+ 
+@@ -155,11 +156,17 @@
+         painter.setClipRect(rect)
+         painter.setPen(QPen(QColor(self.color), 1.4))
+         points = QPolygonF()
++        previous = None
+         for i in envelope_indices(self.values, max(1, int(rect.width()))):
+-            if not np.isfinite(self.values[i]):
++            # A wrapped phase (±180°) splits the curve instead of a vertical segment.
++            if not np.isfinite(self.values[i]) or (self.wrap_period and previous is not None
++                                                   and abs(self.values[i]-previous) > self.wrap_period/2):
+                 painter.drawPolyline(points)
+                 points = QPolygonF()
+-                continue
++                previous = None
++                if not np.isfinite(self.values[i]):
++                    continue
++            previous = self.values[i]
+             points.append(QPointF(left + (self.times[i] - x0) / (x1 - x0) * rect.width(),
+                                   bottom - (self.values[i] - y0) / (y1 - y0) * rect.height()))
+         painter.drawPolyline(points)
+--- a/tests/test_frf_phase.py
++++ b/tests/test_frf_phase.py
+@@ -0,0 +1,55 @@
++import unittest
++
++import numpy as np
++
++from ads1800_app.frf_phase import excitation_mask, reliable_bins, unwrap_deg, wrap_breaks
++from ads1800_app.ui.frf_view import FRF_VIEWS, frf_components
++
++
++class FrfPhaseTest(unittest.TestCase):
++    def test_noise_near_180_degrees_is_not_a_jump_when_unwrapped(self):
++        rng = np.random.default_rng(0)
++        h = -np.exp(1j*np.radians(rng.normal(0, 3, 400)))  # true phase ±180°
++        wrapped = np.angle(h, deg=True)
++        self.assertGreater(len(wrap_breaks(wrapped)), 20)
++        phase = unwrap_deg(h)
++        self.assertEqual(len(wrap_breaks(phase)), 0)
++        self.assertLess(np.ptp(phase), 40)
++
++    def test_unwrap_follows_several_modes_and_skips_masked_bins(self):
++        true = np.linspace(0, -700, 500)
++        h = np.exp(1j*np.radians(true))
++        keep = np.ones(500, bool)
++        keep[200:210] = False
++        phase = unwrap_deg(h, keep)
++        self.assertTrue(np.isnan(phase[200:210]).all())
++        np.testing.assert_allclose(phase[keep], true[keep], atol=1e-9)
++
++    def test_principal_range_and_first_value(self):
++        h = np.exp(1j*np.radians(np.linspace(170, 900, 50)))
++        self.assertTrue(-180 < unwrap_deg(h)[0] <= 180)
++
++    def test_excitation_and_coherence_masks(self):
++        force = np.array([1, 1, .5, .005, np.nan, 1])
++        np.testing.assert_array_equal(excitation_mask(force, 20), [1, 1, 1, 0, 0, 1])
++        h = np.ones(6, complex)
++        coherence = np.array([.9, .7, .95, .99, .99, np.nan])
++        np.testing.assert_array_equal(reliable_bins(h, coherence, .8, excitation_mask(force)), [1, 0, 1, 0, 0, 0])
++        # Fewer than two hits: coherence is all NaN and must not hide every bin.
++        self.assertTrue(reliable_bins(h, np.full(6, np.nan)).all())
++
++    def test_views_keep_previous_indices(self):
++        self.assertEqual(FRF_VIEWS[:3], ['Magnitude + Fase', 'Parte real + Fase', 'Parte real + Parte imaginária'])
++        h = np.exp(1j*np.radians(np.linspace(0, -400, 100)))
++        _, (wrapped, _, fixed) = frf_components(h, 0)
++        _, (unwrapped, label, free) = frf_components(h, 3)
++        self.assertEqual(fixed, (-180, 180))
++        self.assertIsNone(free)
++        self.assertIn('desdobrada', label)
++        self.assertAlmostEqual(unwrapped[-1], -400)
++        _, (shifted, _, _) = frf_components(h, 3, reference=unwrapped+360)
++        np.testing.assert_allclose(shifted, unwrapped+360)
++
++
++if __name__ == '__main__':
++    unittest.main()
